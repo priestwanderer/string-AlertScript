@@ -3,19 +3,21 @@ import { readFileSync } from 'node:fs';
 import process from 'node:process';
 import {
   formatNumber,
-  formatResetTime,
   getAccountName,
   getQuotaAlerts,
   getPaginationTotal,
   isMonitorableAccount,
-  accountInGroup,
   resolveAccountCost,
   shouldFetchUsage,
   unwrapList,
-  usageQuery
+  usageQuery,
+  parseMonitorConfig,
+  buildServerAlerts,
+  buildServerFailureAlert,
+  formatAlertMessage,
+  isOpenAIPlatform
 } from './logic.js';
 
-const DEFAULT_BASE_URL = 'http://103.204.174.231:8080';
 const STATE_FILE = new URL('../data/state.json', import.meta.url);
 
 function loadDotEnv() {
@@ -34,34 +36,31 @@ function loadDotEnv() {
 loadDotEnv();
 
 const config = {
-  baseUrl: (process.env.SUB2API_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, ''),
-  email: process.env.SUB2API_EMAIL || '',
-  password: process.env.SUB2API_PASSWORD || '',
-  webhookUrl: process.env.WECOM_WEBHOOK_URL || '',
-  estimatedCostThreshold: Number(process.env.ESTIMATED_COST_THRESHOLD || 500),
-  quotaRemainPercent: Number(process.env.QUOTA_REMAIN_PERCENT || 20),
-  openaiGroupName: process.env.OPENAI_GROUP_NAME || 'OpenAI',
-  cooldownMinutes: Number(process.env.ALERT_COOLDOWN_MINUTES || 60),
-  pageSize: Number(process.env.PAGE_SIZE || 100),
-  timeoutMs: Number(process.env.REQUEST_TIMEOUT_MS || 30000)
+  ...parseMonitorConfig(process.env)
 };
 
 function parseArgs() {
   const args = new Set(process.argv.slice(2));
-  return { once: args.has('--once'), test: args.has('--test') };
+  return { once: args.has('--once'), test: args.has('--test'), schedule: args.has('--schedule') };
 }
 
 function validateConfig() {
   const missing = [];
-  if (!config.email) missing.push('SUB2API_EMAIL');
-  if (!config.password) missing.push('SUB2API_PASSWORD');
   if (!config.webhookUrl) missing.push('WECOM_WEBHOOK_URL');
+  for (const server of config.servers) {
+    if (!server.baseUrl) missing.push(server.settings.baseUrl);
+    if (!server.email) missing.push(server.settings.email);
+    if (!server.password) missing.push(server.settings.password);
+  }
   if (missing.length > 0) {
     throw new Error(`请先在 .env 中填写：${missing.join('、')}`);
   }
+  if (config.checkIntervalMinutes <= 0) {
+    throw new Error('CHECK_INTERVAL_MINUTES 必须大于 0');
+  }
 }
 
-async function request(path, options = {}, token) {
+async function request(server, path, options = {}, token) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.timeoutMs);
   const headers = {
@@ -72,7 +71,7 @@ async function request(path, options = {}, token) {
   };
 
   try {
-    const response = await fetch(`${config.baseUrl}/api/v1${path}`, {
+    const response = await fetch(`${server.baseUrl}/api/v1${path}`, {
       ...options,
       headers,
       signal: controller.signal
@@ -94,20 +93,20 @@ async function request(path, options = {}, token) {
   }
 }
 
-async function login() {
-  const body = await request('/auth/login', {
+async function login(server) {
+  const body = await request(server, '/auth/login', {
     method: 'POST',
-    body: JSON.stringify({ email: config.email, password: config.password })
+    body: JSON.stringify({ email: server.email, password: server.password })
   });
   const token = body?.access_token ?? body?.data?.access_token;
   if (!token) throw new Error('登录成功响应中没有 access_token');
   return token;
 }
 
-async function getAllAccounts(token) {
+async function getAllAccounts(server, token) {
   const accounts = [];
   for (let page = 1; page <= 1000; page += 1) {
-    const payload = await request(`/admin/accounts?page=${page}&page_size=${config.pageSize}`, {}, token);
+    const payload = await request(server, `/admin/accounts?page=${page}&page_size=${config.pageSize}`, {}, token);
     const current = unwrapList(payload);
     accounts.push(...current);
     const total = getPaginationTotal(payload);
@@ -126,10 +125,10 @@ function usageFor(map, accountId) {
   return undefined;
 }
 
-async function loadUsageMap(token, accounts) {
+async function loadUsageMap(server, token, accounts) {
   const ids = accounts.map((account) => account.id);
   try {
-    const payload = await request('/admin/accounts/usage/batch', {
+    const payload = await request(server, '/admin/accounts/usage/batch', {
       method: 'POST',
       body: JSON.stringify({ account_ids: ids, force: false })
     }, token);
@@ -143,7 +142,7 @@ async function loadUsageMap(token, accounts) {
       };
     }
   } catch (error) {
-    console.warn(`批量获取用量失败，改为逐个查询：${error.message}`);
+    console.warn(`【${server.name}】批量获取用量失败，改为逐个查询：${error.message}`);
   }
 
   const usage = {};
@@ -151,6 +150,7 @@ async function loadUsageMap(token, accounts) {
   for (const account of accounts) {
     try {
       usage[account.id] = await request(
+        server,
         `/admin/accounts/${encodeURIComponent(account.id)}/usage${usageQuery(account)}`,
         {},
         token
@@ -162,10 +162,11 @@ async function loadUsageMap(token, accounts) {
   return { usage, errors };
 }
 
-async function inspect(token) {
-  const allAccounts = (await getAllAccounts(token)).filter(isMonitorableAccount);
+async function inspect(server) {
+  const token = await login(server);
+  const allAccounts = (await getAllAccounts(server, token)).filter(isMonitorableAccount);
   const targets = allAccounts.filter(shouldFetchUsage);
-  const loaded = targets.length > 0 ? await loadUsageMap(token, targets) : { usage: {}, errors: {} };
+  const loaded = targets.length > 0 ? await loadUsageMap(server, token, targets) : { usage: {}, errors: {} };
   const records = [];
   const missingCost = [];
 
@@ -175,7 +176,7 @@ async function inspect(token) {
     if (fetchFailed) {
       const reason = usageFor(loaded.errors, account.id);
       const detail = typeof reason === 'string' ? reason : reason?.message;
-      console.warn(`获取账号“${getAccountName(account)}”用量失败${detail ? `：${detail}` : ''}`);
+      console.warn(`【${server.name}】获取账号“${getAccountName(account)}”用量失败${detail ? `：${detail}` : ''}`);
     }
 
     const resolved = resolveAccountCost(account, fetchFailed ? null : usageItem, { fetchFailed });
@@ -196,7 +197,7 @@ async function inspect(token) {
 
   const allEstimatedCost = records.reduce((sum, record) => sum + record.estimatedCost, 0);
   const openaiEstimatedCost = records
-    .filter(({ account }) => accountInGroup(account, config.openaiGroupName))
+    .filter(({ account }) => isOpenAIPlatform(account))
     .reduce((sum, record) => sum + record.estimatedCost, 0);
   const quotaAlerts = records.flatMap((record) => record.quotaAlerts);
 
@@ -215,30 +216,6 @@ async function readState() {
 async function writeState(state) {
   await mkdir(new URL('../data/', import.meta.url), { recursive: true });
   await writeFile(STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
-}
-
-function buildAlerts(result) {
-  const alerts = [];
-  if (result.allEstimatedCost < config.estimatedCostThreshold) {
-    alerts.push({
-      key: 'all-estimated-cost',
-      text: `⚠️ 所有账号预计总费用：${formatNumber(result.allEstimatedCost)}（阈值 ${formatNumber(config.estimatedCostThreshold)}）`
-    });
-  }
-  if (result.openaiEstimatedCost < config.estimatedCostThreshold) {
-    alerts.push({
-      key: 'openai-estimated-cost',
-      text: `⚠️ OpenAI 分组预计总费用：${formatNumber(result.openaiEstimatedCost)}（阈值 ${formatNumber(config.estimatedCostThreshold)}）`
-    });
-  }
-  for (const alert of result.quotaAlerts) {
-    const reset = formatResetTime(alert.resetsAt);
-    alerts.push({
-      key: `quota:${alert.accountId ?? alert.accountName}:${alert.windowName}`,
-      text: `⚠️ 单账号额度不足：${alert.accountName}（${alert.groupName} / ${alert.platformName}）${alert.windowName} 剩余 ${formatNumber(alert.remainingPercent)}%${reset ? `，预计重置：${reset}` : ''}`
-    });
-  }
-  return alerts;
 }
 
 function shouldSend(alertKey, state, now) {
@@ -260,24 +237,57 @@ async function sendWebhook(message) {
 
 async function run() {
   validateConfig();
-  const token = await login();
-  const result = await inspect(token);
-  const alerts = buildAlerts(result);
   const state = await readState();
   const now = Date.now();
-  const pending = alerts.filter((alert) => shouldSend(alert.key, state, now));
+  const pending = [];
+  const failures = [];
 
-  console.log(`检查完成：${result.accountCount} 个账号，所有账号预计总费用 ${formatNumber(result.allEstimatedCost)}，OpenAI 分组 ${formatNumber(result.openaiEstimatedCost)}`);
-  if (pending.length === 0) {
-    console.log('无新告警');
-    return;
+  for (const server of config.servers) {
+    try {
+      const result = await inspect(server);
+      console.log(`【${server.name}】检查完成：${result.accountCount} 个账号，所有账号预计总费用 ${formatNumber(result.allEstimatedCost)}，OpenAI 平台 ${formatNumber(result.openaiEstimatedCost)}`);
+      pending.push(...buildServerAlerts(server, result, config).filter((alert) => shouldSend(alert.key, state, now)));
+    } catch (error) {
+      failures.push(server.name);
+      console.error(`【${server.name}】巡检失败：${error.message}`);
+      const alert = buildServerFailureAlert(server, error.message);
+      if (shouldSend(alert.key, state, now)) pending.push(alert);
+    }
   }
 
-  const message = `🚨 账号额度警报\n\n${pending.map((alert) => alert.text).join('\n')}`;
-  await sendWebhook(message);
-  for (const alert of pending) state[alert.key] = now;
-  await writeState(state);
-  console.log(`已推送 ${pending.length} 条告警`);
+  if (pending.length === 0) {
+    console.log('无新告警');
+  } else {
+    const message = formatAlertMessage(pending);
+    await sendWebhook(message);
+    for (const alert of pending) state[alert.key] = now;
+    await writeState(state);
+    console.log(`已推送 ${pending.length} 条告警`);
+  }
+
+  if (failures.length > 0) process.exitCode = 1;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function schedule() {
+  validateConfig();
+  const intervalMs = config.checkIntervalMinutes * 60 * 1000;
+  console.log(`定时巡检已启动，每 ${config.checkIntervalMinutes} 分钟检查一次。无异常不发送告警。`);
+  for (;;) {
+    try {
+      process.exitCode = 0;
+      await run();
+    } catch (error) {
+      process.exitCode = 1;
+      console.error(`❌ ${error.message}`);
+    }
+    const nextAt = new Date(Date.now() + intervalMs);
+    console.log(`下次检查：${nextAt.toLocaleString('zh-CN', { hour12: false })}`);
+    await delay(intervalMs);
+  }
 }
 
 async function main() {
@@ -286,6 +296,11 @@ async function main() {
     console.log('配置测试模式：仅检查 .env 配置，不请求远程接口');
     validateConfig();
     console.log('配置完整');
+    return;
+  }
+
+  if (args.schedule) {
+    await schedule();
     return;
   }
 

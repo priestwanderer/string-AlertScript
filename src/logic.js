@@ -153,6 +153,10 @@ export function getPlatformName(account) {
   return String(firstDefined(account, PLATFORM_KEYS) ?? '未知平台');
 }
 
+export function isOpenAIPlatform(account) {
+  return getPlatformName(account).trim().toLowerCase() === 'openai';
+}
+
 export function isMonitorableAccount(account) {
   const status = String(account?.status ?? '').toLowerCase();
   if (['disabled', 'inactive', 'deleted', 'error'].includes(status)) return false;
@@ -284,4 +288,120 @@ export function formatResetTime(value) {
   if (!value) return '';
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false });
+}
+
+const SERVER_ID_PATTERN = /^[A-Za-z][A-Za-z0-9_]*$/;
+
+function readNumber(env, key, fallback) {
+  const raw = env?.[key];
+  if (raw === undefined || raw === null || String(raw).trim() === '') return fallback;
+  const number = Number(raw);
+  if (!Number.isFinite(number)) throw new Error(`${key} 不是有效数字`);
+  return number;
+}
+
+function normalizeBaseUrl(value) {
+  return String(value || '').trim().replace(/\/+$/, '');
+}
+
+function serverNameFromUrl(baseUrl, fallback) {
+  try {
+    return new URL(baseUrl).host || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function parseLegacyServer(env) {
+  const baseUrl = normalizeBaseUrl(env.SUB2API_BASE_URL);
+  const name = String(env.SUB2API_NAME || '').trim() || serverNameFromUrl(baseUrl, '默认服务器');
+  return {
+    id: 'default',
+    name,
+    baseUrl,
+    email: String(env.SUB2API_EMAIL || '').trim(),
+    password: String(env.SUB2API_PASSWORD || ''),
+    settings: {
+      baseUrl: 'SUB2API_BASE_URL',
+      email: 'SUB2API_EMAIL',
+      password: 'SUB2API_PASSWORD'
+    }
+  };
+}
+
+function parseNamedServer(env, id) {
+  if (!SERVER_ID_PATTERN.test(id)) {
+    throw new Error(`SUB2API_SERVERS 包含无效标识“${id}”，只允许字母、数字和下划线，且必须以字母开头`);
+  }
+  const prefix = `SUB2API_SERVER_${id.toUpperCase()}_`;
+  const baseUrl = normalizeBaseUrl(env[`${prefix}BASE_URL`]);
+  const name = String(env[`${prefix}NAME`] || '').trim() || serverNameFromUrl(baseUrl, id);
+  return {
+    id,
+    name,
+    baseUrl,
+    email: String(env[`${prefix}EMAIL`] || '').trim(),
+    password: String(env[`${prefix}PASSWORD`] || ''),
+    settings: {
+      baseUrl: `${prefix}BASE_URL`,
+      email: `${prefix}EMAIL`,
+      password: `${prefix}PASSWORD`
+    }
+  };
+}
+
+export function parseMonitorConfig(env = {}) {
+  const ids = String(env.SUB2API_SERVERS || '').split(',').map((item) => item.trim()).filter(Boolean);
+  if (new Set(ids).size !== ids.length) {
+    throw new Error('SUB2API_SERVERS 包含重复的服务器标识');
+  }
+
+  return {
+    webhookUrl: String(env.WECOM_WEBHOOK_URL || '').trim(),
+    estimatedCostThreshold: readNumber(env, 'ESTIMATED_COST_THRESHOLD', 500),
+    quotaRemainPercent: readNumber(env, 'QUOTA_REMAIN_PERCENT', 20),
+    cooldownMinutes: readNumber(env, 'ALERT_COOLDOWN_MINUTES', 60),
+    pageSize: readNumber(env, 'PAGE_SIZE', 100),
+    timeoutMs: readNumber(env, 'REQUEST_TIMEOUT_MS', 30000),
+    checkIntervalMinutes: readNumber(env, 'CHECK_INTERVAL_MINUTES', 60),
+    servers: ids.length > 0
+      ? ids.map((id) => parseNamedServer(env, id))
+      : [parseLegacyServer(env)]
+  };
+}
+
+export function buildServerAlerts(server, result, config) {
+  const label = `【${server.name}】`;
+  const alerts = [];
+  if (result.allEstimatedCost < config.estimatedCostThreshold) {
+    alerts.push({
+      key: `${server.id}:all-estimated-cost`,
+      text: `⚠️ ${label}所有账号预计总费用：${formatNumber(result.allEstimatedCost)}（阈值 ${formatNumber(config.estimatedCostThreshold)}）`
+    });
+  }
+  if (result.openaiEstimatedCost < config.estimatedCostThreshold) {
+    alerts.push({
+      key: `${server.id}:openai-estimated-cost`,
+      text: `⚠️ ${label}OpenAI 平台预计总费用：${formatNumber(result.openaiEstimatedCost)}（阈值 ${formatNumber(config.estimatedCostThreshold)}）`
+    });
+  }
+  for (const alert of result.quotaAlerts) {
+    const reset = formatResetTime(alert.resetsAt);
+    alerts.push({
+      key: `${server.id}:quota:${alert.accountId ?? alert.accountName}:${alert.windowName}`,
+      text: `⚠️ ${label}单账号额度不足：${alert.accountName}（${alert.groupName} / ${alert.platformName}）${alert.windowName} 剩余 ${formatNumber(alert.remainingPercent)}%${reset ? `，预计重置：${reset}` : ''}`
+    });
+  }
+  return alerts;
+}
+
+export function buildServerFailureAlert(server, message) {
+  return {
+    key: `${server.id}:inspect-failed`,
+    text: `⚠️ 【${server.name}】巡检失败：${message}`
+  };
+}
+
+export function formatAlertMessage(alerts) {
+  return `🚨 账号额度警报\n\n${alerts.map((alert) => alert.text).join('\n')}`;
 }

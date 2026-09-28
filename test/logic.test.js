@@ -6,9 +6,14 @@ import {
   isMonitorableAccount,
   accountInGroup,
   getGroupName,
+  isOpenAIPlatform,
   resolveAccountCost,
   shouldFetchUsage,
-  usageQuery
+  usageQuery,
+  parseMonitorConfig,
+  buildServerAlerts,
+  buildServerFailureAlert,
+  formatAlertMessage
 } from '../src/logic.js';
 
 test('uses estimated total cost and does not fall back to balance fields', () => {
@@ -113,4 +118,61 @@ test('group membership reads groups[].name', () => {
   assert.equal(getGroupName(account), 'rotation');
   assert.equal(accountInGroup(account, 'grok'), true);
   assert.equal(accountInGroup({ group_name: 'OpenAI' }, 'OpenAI'), true);
+});
+
+test('OpenAI total includes every OpenAI platform account regardless of group', () => {
+  assert.equal(isOpenAIPlatform({ platform: 'openai', groups: [{ name: 'rotation' }] }), true);
+  assert.equal(isOpenAIPlatform({ platform_name: 'OpenAI', groups: [{ name: 'grok' }] }), true);
+  assert.equal(isOpenAIPlatform({ platform: 'grok', groups: [{ name: 'OpenAI' }] }), false);
+});
+
+test('server address comes from env and is not given a built-in default', () => {
+  const config = parseMonitorConfig({
+    SUB2API_EMAIL: 'a@example.com',
+    SUB2API_PASSWORD: 'secret'
+  });
+  assert.equal(config.servers[0].baseUrl, '');
+  assert.equal(config.servers[0].settings.baseUrl, 'SUB2API_BASE_URL');
+});
+
+test('multiple servers keep their own address, name, and group', () => {
+  const config = parseMonitorConfig({
+    SUB2API_SERVERS: 'main, backup',
+    SUB2API_SERVER_MAIN_NAME: '主服务器',
+    SUB2API_SERVER_MAIN_BASE_URL: 'http://10.0.0.1:8080/',
+    SUB2API_SERVER_MAIN_EMAIL: 'a@example.com',
+    SUB2API_SERVER_MAIN_PASSWORD: 'secret',
+    SUB2API_SERVER_BACKUP_BASE_URL: 'http://10.0.0.2:8080',
+    SUB2API_SERVER_BACKUP_EMAIL: 'b@example.com',
+    SUB2API_SERVER_BACKUP_PASSWORD: 'secret'
+  });
+  assert.deepEqual(config.servers.map((server) => server.id), ['main', 'backup']);
+  assert.equal(config.servers[0].baseUrl, 'http://10.0.0.1:8080');
+  assert.equal(config.servers[0].name, '主服务器');
+  assert.equal(config.servers[1].name, '10.0.0.2:8080');
+});
+
+test('hourly check interval defaults to 60 minutes', () => {
+  assert.equal(parseMonitorConfig({}).checkIntervalMinutes, 60);
+  assert.equal(parseMonitorConfig({ CHECK_INTERVAL_MINUTES: '30' }).checkIntervalMinutes, 30);
+});
+
+test('alerts are labeled and keyed by server', () => {
+  const server = { id: 'main', name: '主服务器' };
+  const alerts = buildServerAlerts(server, {
+    allEstimatedCost: 100,
+    openaiEstimatedCost: 800,
+    quotaAlerts: [{
+      accountId: '7',
+      accountName: 'demo',
+      groupName: 'rotation',
+      platformName: 'openai',
+      windowName: '5h',
+      remainingPercent: 10
+    }]
+  }, { estimatedCostThreshold: 500 });
+  assert.deepEqual(alerts.map((alert) => alert.key), ['main:all-estimated-cost', 'main:quota:7:5h']);
+  assert.match(formatAlertMessage(alerts), /【主服务器】所有账号预计总费用/);
+  assert.match(formatAlertMessage(alerts), /【主服务器】单账号额度不足：demo/);
+  assert.match(buildServerFailureAlert({ id: 'backup', name: '备用服务器' }, '登录失败').text, /【备用服务器】巡检失败：登录失败/);
 });
