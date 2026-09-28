@@ -5,6 +5,9 @@ const WEB_ROOT = new URL('../web/', import.meta.url);
 const FILES = new Map([
   ['/', 'index.html'],
   ['/index.html', 'index.html'],
+  ['/monitor.css', 'monitor.css'],
+  ['/monitor-view.js', 'monitor-view.js'],
+  ['/vendor/lucide-sprite.svg', 'vendor/lucide-sprite.svg'],
   ['/vendor/vue.global.prod.js', 'vendor/vue.global.prod.js']
 ]);
 
@@ -45,7 +48,7 @@ async function readJson(req) {
   }
 }
 
-export function serveUi({ host = '127.0.0.1', port = 8787, loadConfig, saveConfig, listGroups, checkOnce, scheduleStatus, setSchedule }) {
+export function serveUi({ host = '127.0.0.1', port = 8787, loadConfig, saveConfig, listGroups, checkOnce, scheduleStatus, setSchedule, monitorSnapshot }) {
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url || '/', 'http://127.0.0.1');
@@ -71,6 +74,10 @@ export function serveUi({ host = '127.0.0.1', port = 8787, loadConfig, saveConfi
         sendJson(res, 200, await scheduleStatus());
         return;
       }
+      if (req.method === 'GET' && url.pathname === '/api/monitor') {
+        sendJson(res, 200, await monitorSnapshot(url.searchParams.get('server') || ''));
+        return;
+      }
       if (req.method === 'PUT' && url.pathname === '/api/schedule') {
         const body = await readJson(req);
         sendJson(res, 200, await setSchedule(Boolean(body?.enabled)));
@@ -81,7 +88,9 @@ export function serveUi({ host = '127.0.0.1', port = 8787, loadConfig, saveConfi
       if (req.method === 'GET' && relative) {
         const fileUrl = new URL(relative, WEB_ROOT);
         const body = await readFile(fileUrl);
-        const type = relative.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/html; charset=utf-8';
+        const type = relative.endsWith('.js') ? 'text/javascript; charset=utf-8'
+          : relative.endsWith('.css') ? 'text/css; charset=utf-8'
+            : relative.endsWith('.svg') ? 'image/svg+xml' : 'text/html; charset=utf-8';
         res.writeHead(200, {
           'Content-Type': type,
           'Content-Length': body.length,

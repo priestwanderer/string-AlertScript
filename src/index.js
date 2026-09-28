@@ -8,7 +8,11 @@ import {
   getPaginationTotal,
   isMonitorableAccount,
   readGroupCatalog,
+  accountListQuery,
+  accountListKeepsMembership,
+  attachGroupCatalog,
   resolveAccountCost,
+  getUsedCost,
   resolveMonitoredGroups,
   shouldFetchUsage,
   summarizeGroupCosts,
@@ -16,7 +20,9 @@ import {
   usageQuery,
   buildServerAlerts,
   buildServerFailureAlert,
-  formatAlertMessage
+  buildMonitorView,
+  formatAlertMessage,
+  createInspectionGate
 } from './logic.js';
 import { loadMonitorConfig, saveMonitorConfig } from './config-store.js';
 import { serveUi } from './ui-server.js';
@@ -53,18 +59,24 @@ function parseArgs() {
 function validateConfig() {
   const missing = [];
   if (!config.webhookUrl) missing.push('WECOM_WEBHOOK_URL');
-  for (const server of config.servers) {
-    if (server.enabled === false) continue;
-    if (!server.baseUrl) missing.push(server.settings.baseUrl);
-    if (!server.email) missing.push(server.settings.email);
-    if (!server.password) missing.push(server.settings.password);
-  }
+  missing.push(...missingCredentials());
   if (missing.length > 0) {
     throw new Error(`请先在 .env 中填写：${missing.join('、')}`);
   }
   if (config.checkIntervalMinutes <= 0) {
     throw new Error('CHECK_INTERVAL_MINUTES 必须大于 0');
   }
+}
+
+function missingCredentials(servers = config.servers) {
+  const missing = [];
+  for (const server of servers) {
+    if (server.enabled === false) continue;
+    if (!server.baseUrl) missing.push(server.settings.baseUrl);
+    if (!server.email) missing.push(server.settings.email);
+    if (!server.password) missing.push(server.settings.password);
+  }
+  return missing;
 }
 
 async function request(server, path, options = {}, token) {
@@ -111,9 +123,33 @@ async function login(server) {
 }
 
 async function getAllAccounts(server, token) {
+  const attempts = [
+    { status: 'active', lite: true },
+    { status: 'active', lite: false },
+    { status: '', lite: false }
+  ];
+  let lastError = null;
+  for (const query of attempts) {
+    try {
+      const accounts = await fetchAccountPages(server, token, query);
+      if (query.lite && !accountListKeepsMembership(accounts)) continue;
+      return accounts;
+    } catch (error) {
+      lastError = error;
+      if (!isUnsupportedAccountQuery(error)) throw error;
+    }
+  }
+  throw lastError ?? new Error('账号列表获取失败');
+}
+
+function isUnsupportedAccountQuery(error) {
+  return /返回 HTTP (400|422)\b/.test(String(error?.message || ''));
+}
+
+async function fetchAccountPages(server, token, query) {
   const accounts = [];
   for (let page = 1; page <= 1000; page += 1) {
-    const payload = await request(server, `/admin/accounts?page=${page}&page_size=${config.pageSize}`, {}, token);
+    const payload = await request(server, accountListQuery(page, config.pageSize, query), {}, token);
     const current = unwrapList(payload);
     accounts.push(...current);
     const total = getPaginationTotal(payload);
@@ -122,6 +158,18 @@ async function getAllAccounts(server, token) {
     }
   }
   return accounts;
+}
+
+async function loadGroupCatalog(server, token) {
+  try {
+    return readGroupCatalog(await request(server, '/admin/groups/all?include_inactive=true', {}, token));
+  } catch {
+    try {
+      return readGroupCatalog(await request(server, '/admin/groups/all', {}, token));
+    } catch {
+      return [];
+    }
+  }
 }
 
 function usageFor(map, accountId) {
@@ -171,7 +219,11 @@ async function loadUsageMap(server, token, accounts) {
 
 async function inspect(server) {
   const token = await login(server);
-  const allAccounts = (await getAllAccounts(server, token)).filter(isMonitorableAccount);
+  const [listed, catalog] = await Promise.all([
+    getAllAccounts(server, token),
+    loadGroupCatalog(server, token)
+  ]);
+  const allAccounts = attachGroupCatalog(listed, catalog).filter(isMonitorableAccount);
   const targets = allAccounts.filter(shouldFetchUsage);
   const loaded = targets.length > 0 ? await loadUsageMap(server, token, targets) : { usage: {}, errors: {} };
   const records = [];
@@ -194,6 +246,7 @@ async function inspect(server) {
     records.push({
       account,
       estimatedCost: resolved.cost ?? 0,
+      usedCost: usageItem ? getUsedCost(usageItem) : null,
       quotaAlerts: usageItem ? getQuotaAlerts(usageItem, account, config.quotaRemainPercent) : []
     });
   }
@@ -206,7 +259,7 @@ async function inspect(server) {
   const groupCosts = summarizeGroupCosts(records, resolveMonitoredGroups(server, records.map((record) => record.account)));
   const allEstimatedCost = records.reduce((sum, record) => sum + record.estimatedCost, 0);
 
-  return { allEstimatedCost, groupCosts, quotaAlerts, accountCount: records.length };
+  return { allEstimatedCost, groupCosts, quotaAlerts, accountCount: records.length, records };
 }
 
 async function readState() {
@@ -291,25 +344,71 @@ async function run() {
   };
 }
 
-let runPromise = null;
 let scheduleEnabled = false;
 let scheduleToken = 0;
 let cancelDelay = null;
+const inspection = createInspectionGate();
 
 function checkOnce() {
-  if (runPromise) {
-    const error = new Error('巡检进行中');
-    error.statusCode = 409;
-    throw error;
-  }
-  runPromise = run().finally(() => {
-    runPromise = null;
-  });
-  return runPromise;
+  return inspection.checkOnce(() => run());
 }
 
 function currentScheduleStatus() {
-  return { enabled: scheduleEnabled, running: Boolean(runPromise) };
+  return { enabled: scheduleEnabled, running: inspection.isChecking() };
+}
+
+function monitorSnapshot(serverId = '') {
+  const key = serverId || '*';
+  return inspection.monitorServer(key, async () => {
+    config = await loadMonitorConfig();
+    if (serverId) {
+      const server = config.servers.find((item) => item.id === serverId);
+      if (!server) throw new Error(`没有找到服务器“${serverId}”`);
+      if (server.enabled === false) throw new Error(`【${server.name}】监控已关闭`);
+      const missing = missingCredentials([server]);
+      if (missing.length > 0) throw new Error(`请先在 .env 中填写：${missing.join('、')}`);
+      return { generatedAt: new Date().toISOString(), server: await inspectServerView(server) };
+    }
+    const active = config.servers.filter((server) => server.enabled !== false);
+    const missing = missingCredentials(active);
+    if (missing.length > 0) throw new Error(`请先在 .env 中填写：${missing.join('、')}`);
+    if (active.length === 0) {
+      return { generatedAt: new Date().toISOString(), servers: [], message: '没有启用监控的服务器' };
+    }
+    const servers = await Promise.all(active.map((server) => inspectServerView(server)));
+    return { generatedAt: new Date().toISOString(), servers };
+  });
+}
+
+async function inspectServerView(server) {
+  try {
+    return buildMonitorView(server, await inspect(server));
+  } catch (error) {
+    return {
+      id: server.id,
+      name: server.name,
+      threshold: server.estimatedCostThreshold,
+      lowGroupCount: 0,
+      urgentAccountCount: 0,
+      all: null,
+      groups: [],
+      error: error.message
+    };
+  }
+}
+
+async function nextScheduledCheck() {
+  for (;;) {
+    const activeRun = inspection.currentRun();
+    if (activeRun) return activeRun;
+    const activeMonitor = inspection.currentMonitor();
+    if (!activeMonitor) return checkOnce();
+    try {
+      await activeMonitor;
+    } catch {
+      // 监控读取失败不代替这一轮告警巡检。
+    }
+  }
 }
 
 function delayUntilStopped(ms) {
@@ -332,7 +431,7 @@ async function runScheduleLoop(token) {
   while (scheduleEnabled && token === scheduleToken) {
     try {
       process.exitCode = 0;
-      const result = runPromise ? await runPromise : await checkOnce();
+      const result = await nextScheduledCheck();
       if (result.failures.length > 0) process.exitCode = 1;
       if (announcedInterval !== config?.checkIntervalMinutes) {
         announcedInterval = config?.checkIntervalMinutes;
@@ -397,7 +496,8 @@ async function startUi() {
     listGroups,
     checkOnce,
     scheduleStatus: currentScheduleStatus,
-    setSchedule
+    setSchedule,
+    monitorSnapshot
   });
   console.log(`配置页面：${ui.address}`);
 }

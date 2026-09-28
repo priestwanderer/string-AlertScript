@@ -9,6 +9,8 @@
     "once": "node src/index.js --once",
     "hourly": "node src/index.js --schedule",
     "ui": "node src/index.js --ui",
+    "ui:preview": "node scripts/preview-ui.mjs",
+    "test:ui": "node scripts/verify-monitor-ui.mjs",
     "test": "node --test"
   },
   "engines": {

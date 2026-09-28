@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>String 额度告警</title>
+  <title>String · 额度监控</title>
   <style>
     :root {
       --canvas: #f8f8f4;
@@ -45,9 +45,9 @@
       position: sticky;
       top: 0;
       z-index: 2;
-      display: flex;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
       align-items: center;
-      justify-content: space-between;
       gap: 16px;
       min-height: var(--header);
       padding: 12px 24px;
@@ -55,7 +55,11 @@
       background: rgba(248, 248, 244, 0.94);
     }
 
-    .brand { display: flex; align-items: baseline; min-width: 0; gap: 10px; }
+    .brand { display: flex; align-items: baseline; min-width: 0; gap: 10px; justify-self: start; }
+
+    .page-nav { justify-self: center; }
+
+    .top-actions { justify-self: end; }
 
     .mark {
       font-family: Palatino, "Palatino Linotype", "Iowan Old Style", Georgia, serif;
@@ -65,7 +69,7 @@
 
     .product { color: var(--ink-2); font-size: 14px; white-space: nowrap; }
 
-    main { max-width: 1120px; margin: 0 auto; padding: 24px 24px 72px; }
+    main { max-width: 1240px; margin: 0 auto; padding: 24px 24px 72px; }
 
     .status { min-height: 22px; margin: 0 0 20px; font-size: 14px; overflow-wrap: anywhere; }
 
@@ -96,7 +100,7 @@
       display: block;
       margin-bottom: 6px;
       color: var(--ink-2);
-      font-size: 13px;
+      font-size: 14px;
     }
 
     input[type="text"], input[type="password"], input[type="number"] {
@@ -164,7 +168,7 @@
       line-height: 1.25;
     }
 
-    .switch-copy.stack small { color: var(--ink-3); font-size: 12px; line-height: 1.3; }
+    .switch-copy.stack small { color: var(--ink-3); font-size: 13px; line-height: 1.4; }
 
     .balance-alert { height: auto; min-height: 40px; margin-top: 16px; padding-top: 7px; padding-bottom: 7px; }
 
@@ -286,7 +290,7 @@
       margin-top: 2px;
       color: var(--ink-3);
       font-family: var(--mono);
-      font-size: 12px;
+      font-size: 13px;
       line-height: 1.4;
       overflow-wrap: anywhere;
     }
@@ -345,7 +349,7 @@
 
     .check b { font-weight: 500; overflow-wrap: anywhere; }
 
-    .muted { color: var(--ink-3); font-size: 12px; }
+    .muted { color: var(--ink-3); font-size: 13px; }
 
     .group-status { min-height: 20px; margin: 8px 0 0; color: var(--danger); font-size: 13px; overflow-wrap: anywhere; }
 
@@ -358,6 +362,29 @@
       background: var(--soft);
       font-size: 13px;
       overflow-wrap: anywhere;
+    }
+
+    .sk {
+      display: inline-block;
+      height: 14px;
+      border-radius: 8px;
+      background: linear-gradient(90deg, #eceae4 25%, #f7f7f3 45%, #eceae4 65%);
+      background-size: 220% 100%;
+      animation: sk-shimmer 1.4s ease-in-out infinite;
+      vertical-align: middle;
+    }
+
+    .sk-title { display: block; width: 96px; height: 18px; }
+
+    .sk-bar { display: block; width: 100%; height: 8px; margin-top: 14px; }
+
+    @keyframes sk-shimmer {
+      from { background-position: 100% 0; }
+      to { background-position: -100% 0; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .sk { animation: none; background: #eceae4; }
     }
 
     @media (max-width: 959px) {
@@ -382,20 +409,36 @@
       .segment, .section-head .ghost, .group-head .ghost { width: 100%; }
       .segment { display: flex; }
       .segment button { flex: 1 1 0; }
+      .top { display: flex; flex-wrap: wrap; row-gap: 10px; }
+      .page-nav { order: 3; flex: 1 0 100%; }
+      .top-actions { margin-left: auto; }
       .mark { font-size: 24px; }
     }
   </style>
+  <link rel="stylesheet" href="/monitor.css">
 </head>
 <body>
   <div id="app" v-cloak>
     <header class="top">
       <div class="brand">
+        <span class="brand-glyph" aria-hidden="true">S</span>
         <span class="mark">String</span>
-        <span class="product">额度告警</span>
+        <span class="product">额度监控</span>
       </div>
-      <button class="primary" type="button" @click="save" :disabled="saving || loading">{{ saving ? '保存中' : '保存' }}</button>
+      <div class="page-nav">
+        <div class="segment" role="tablist" aria-label="页面">
+          <button type="button" role="tab" :aria-selected="page === 'monitor' ? 'true' : 'false'" :class="{ active: page === 'monitor' }" @click="openMonitor"><ui-icon name="activity"></ui-icon>监控</button>
+          <button type="button" role="tab" :aria-selected="page === 'config' ? 'true' : 'false'" :class="{ active: page === 'config' }" @click="openConfig"><ui-icon name="settings-2"></ui-icon>配置</button>
+        </div>
+      </div>
+      <div class="top-actions">
+        <span class="header-sync" v-if="page === 'monitor'"><i class="status-dot" :class="{ syncing: monitorActive }"></i>{{ monitorActive ? '正在同步' : '30 秒自动刷新' }}</span>
+        <button v-if="page === 'config'" class="primary" type="button" @click="save" :disabled="saving || loading"><ui-icon name="save"></ui-icon>{{ saving ? '保存中' : '保存' }}</button>
+        <button v-else class="ghost refresh-all" type="button" @click="refreshMonitor" :disabled="monitorBusy || loading || !monitorCards.length"><ui-icon name="refresh-cw" :class="{ spinning: monitorActive }"></ui-icon>{{ monitorActive ? '刷新中' : '刷新' }}</button>
+      </div>
     </header>
     <main>
+      <template v-if="page === 'config'">
       <p class="status" :class="{ ok: tone === 'ok', bad: tone === 'bad' }">{{ status }}</p>
       <section>
         <h2>告警</h2>
@@ -512,11 +555,77 @@
           </article>
         </div>
       </section>
+      </template>
+      <div v-else class="monitor-page">
+        <div class="monitor-heading">
+          <div><p class="eyebrow">WORKSPACE / MONITORING</p><h1>监控概览<span class="heading-tag">{{ previewMode ? '预览数据' : '实时' }}</span></h1><p class="page-description">服务器余额与账号额度</p></div>
+          <div class="schedule-note"><ui-icon name="bell"></ui-icon>定时告警<span :class="{ 'text-success': scheduleEnabled }">{{ scheduleEnabled ? '已开启' : '未开启' }}</span></div>
+        </div>
+        <div v-if="tone === 'bad' && status" class="read-error" role="alert"><ui-icon name="circle-alert"></ui-icon><span>{{ status }}</span><button class="text-button" type="button" @click="load">重试</button></div>
+
+        <section class="overview-strip" aria-label="监控汇总">
+          <div class="overview-stat"><div class="stat-label">监控服务器<ui-icon name="server"></ui-icon></div><div class="stat-value">{{ loading ? '--' : monitorSummary.total }}<small>台</small></div><div class="stat-foot"><i class="status-dot" :class="{ neutral: !monitorSummary.readable }"></i>{{ monitorSummary.readable }} 台已读取<span v-if="monitorSummary.pending"> · {{ monitorSummary.pending }} 台读取中</span></div></div>
+          <div class="overview-stat"><div class="stat-label">需关注服务器<ui-icon name="circle-alert"></ui-icon></div><div class="stat-value" :class="{ 'text-warning': monitorSummary.attention > 0 }">{{ loading ? '--' : monitorSummary.attention }}<small>台</small></div><div class="stat-foot">{{ monitorSummary.errors ? `${monitorSummary.errors} 台读取异常` : '余额 / 额度异常' }}</div></div>
+          <div class="overview-stat"><div class="stat-label">余额不足分组<ui-icon name="layers"></ui-icon></div><div class="stat-value" :class="{ 'text-warning': monitorSummary.lowGroups > 0 }">{{ loading ? '--' : monitorSummary.lowGroups ?? '--' }}<small>组</small></div><div class="stat-foot">低于服务器设定阈值</div></div>
+          <div class="overview-stat"><div class="stat-label">告急账号<ui-icon name="users"></ui-icon></div><div class="stat-value" :class="{ 'text-danger': monitorSummary.urgentAccounts > 0 }">{{ loading ? '--' : monitorSummary.urgentAccounts ?? '--' }}<small>个</small></div><div class="stat-foot">窗口剩余额度不足 {{ form.quotaRemainPercent ?? '--' }}%</div></div>
+        </section>
+
+        <section class="monitor-content" aria-labelledby="server-heading">
+          <div class="monitor-toolbar">
+            <div class="server-tabs" role="group" aria-label="筛选服务器"><button type="button" :class="{ active: !selectedServer }" :aria-pressed="!selectedServer" @click="selectedServer = ''">全部服务器<span>{{ monitorCards.length }}</span></button><button v-for="card in monitorCards" :key="card.id" type="button" :class="{ active: selectedServer === card.id }" :aria-pressed="selectedServer === card.id" @click="selectedServer = card.id"><i class="status-dot" :class="cardStatus(card).tone"></i>{{ card.name || card.id }}</button></div>
+            <div class="filter-tools"><label class="attention-filter"><input type="checkbox" v-model="attentionOnly">仅看异常</label><div class="monitor-search"><ui-icon name="search"></ui-icon><input v-model="monitorQuery" type="search" aria-label="搜索服务器、分组或账号" placeholder="搜索分组、账号…"><button v-if="monitorQuery" type="button" class="search-clear" title="清空搜索" aria-label="清空搜索" @click="monitorQuery = ''"><ui-icon name="x"></ui-icon></button></div></div>
+          </div>
+          <div class="list-heading"><h2 id="server-heading">服务器状态 <span>{{ visibleMonitorCards.length }}</span></h2><span v-if="monitorSummary.errors" class="text-warning">部分数据未更新</span><span v-else>仅展示异常分组与告急账号</span></div>
+          <div class="monitor-stack" :aria-busy="loading || monitorActive">
+            <div v-if="loading && !monitorCards.length" class="monitor-placeholder" role="status" aria-label="正在读取监控配置"><span class="sk sk-title"></span><span class="sk sk-bar"></span><span class="sk sk-bar"></span></div>
+            <article class="monitor-server" v-for="card in visibleMonitorCards" :key="card.uid" :data-status="cardStatus(card).tone">
+              <header class="monitor-server-head">
+                <div class="server-identity"><span class="server-avatar"><ui-icon name="server"></ui-icon></span><div><div class="server-title-line"><h3>{{ card.name || card.id }}</h3><span class="state-label" :class="cardStatus(card).tone"><i class="status-dot"></i>{{ cardStatus(card).label }}</span></div><div class="server-subline"><span class="mono">{{ card.id }}</span><span>告警阈值 <b>{{ moneyNumber(card.view?.threshold ?? card.threshold) }} <small>USD</small></b></span></div></div></div>
+                <div class="server-header-actions"><span class="updated-at" :title="formatStamp(card.generatedAt)">{{ card.loading ? '正在读取用量' : card.generatedAt ? `更新于 ${formatTime(card.generatedAt)}` : '等待数据' }}</span><button class="icon compact" type="button" :title="`刷新 ${card.name || card.id}`" :aria-label="`刷新 ${card.name || card.id}`" :disabled="card.loading" @click="loadServer(card.id)"><ui-icon name="refresh-cw" :class="{ spinning: card.loading }"></ui-icon></button></div>
+              </header>
+              <div v-if="card.skeleton" class="server-loading" role="status" aria-label="正在读取服务器用量"><span class="sk sk-title"></span><span class="sk sk-bar"></span><span class="sk sk-bar"></span></div>
+              <template v-else>
+                <div v-if="card.error || card.view?.error" class="read-error" role="status"><ui-icon name="circle-alert"></ui-icon><div><strong>{{ card.view && !card.view.error ? '刷新失败，保留上次数据' : '暂时无法读取服务器' }}</strong><p>{{ card.error || card.view.error }}</p></div><button type="button" class="text-button" :disabled="card.loading" @click="loadServer(card.id)">重试</button></div>
+                <template v-if="card.view && !card.view.error">
+                  <div v-if="card.view.all" class="balance-warning"><div class="balance-warning-label"><ui-icon name="circle-alert"></ui-icon><span>全账号总余额不足</span></div><div><small>总余额</small><strong>{{ moneyNumber(card.view.all.estimatedCost) }} <em>USD</em></strong></div><div><small>已使用</small><strong>{{ moneyNumber(card.view.all.usedCost) }} <em>USD</em></strong></div><div class="threshold-track"><div><small>相对告警阈值</small><b>{{ percentText(balancePercent(card.view.all.estimatedCost, card.view.threshold)) }}</b></div><div class="quota-track"><i :style="{ width: meterWidth(balancePercent(card.view.all.estimatedCost, card.view.threshold)) }"></i></div></div></div>
+                  <div class="group-table" v-if="card.view.groups.length">
+                    <div class="group-columns" aria-hidden="true"><span>异常分组</span><span>总余额 <small>USD</small></span><span>已使用 <small>USD</small></span><span>告急账号</span><span></span></div>
+                    <div class="monitor-group" v-for="group in card.view.groups" :key="groupKey(group)">
+                      <button class="group-summary" type="button" :aria-label="`${group.name}，${group.urgentCount} 个告急账号`" :aria-expanded="group.accounts.length ? groupExpanded(card.id, group) : undefined" :aria-controls="group.accounts.length ? detailsId(card.id, group) : undefined" :disabled="!group.accounts.length" @click="toggleDetails(card.id, group)">
+                        <span class="group-identity"><ui-icon name="layers"></ui-icon><span><strong>{{ group.name }}</strong><small :class="group.low ? 'text-warning' : 'subtle'">{{ group.low ? '余额低于阈值' : '账号额度告急' }}</small></span></span>
+                        <span class="numeric group-balance" :class="{ 'text-warning': group.low }"><small class="mobile-label">总余额 · USD</small>{{ moneyNumber(group.estimatedCost) }}</span>
+                        <span class="numeric group-used"><small class="mobile-label">已使用 · USD</small>{{ moneyNumber(group.usedCost) }}</span>
+                        <span class="group-urgent"><span v-if="group.urgentCount" class="urgent-label">{{ group.urgentCount }} 个告急</span><span v-else class="subtle">无告急账号</span></span>
+                        <ui-icon name="chevron-down" class="expand-icon" :class="{ expanded: groupExpanded(card.id, group), invisible: !group.accounts.length }"></ui-icon>
+                      </button>
+                      <div class="account-details" v-if="group.accounts.length && groupExpanded(card.id, group)" :id="detailsId(card.id, group)">
+                        <div class="account-columns" aria-hidden="true"><span>账号 / 平台</span><span>总余额 <small>USD</small></span><span>已使用 <small>USD</small></span><span>告急窗口 · 剩余额度</span></div>
+                        <div class="monitor-account" v-for="account in group.accounts" :key="account.id == null ? account.name : account.id">
+                          <div class="account-identity"><span class="account-avatar" :class="platformClass(account.platform)">{{ platformInitial(account.platform) }}</span><div><strong :title="account.name">{{ account.name }}</strong><span>{{ account.platform || '未知平台' }}</span></div></div>
+                          <div class="numeric account-balance"><small class="mobile-label">总余额 · USD</small>{{ moneyNumber(account.estimatedCost) }}</div>
+                          <div class="numeric account-used"><small class="mobile-label">已使用 · USD</small>{{ moneyNumber(account.usedCost) }}</div>
+                          <div class="account-windows"><template v-for="windowName in ['5h', '7d']" :key="windowName"><div v-if="windowPercent(account, windowName) != null" class="window-meter" :class="{ critical: windowPercent(account, windowName) <= 5 }"><span>{{ windowName }}</span><div class="quota-track" aria-hidden="true"><i :style="{ width: meterWidth(windowPercent(account, windowName)) }"></i></div><b>{{ percentText(windowPercent(account, windowName)) }}</b></div></template><span v-if="!account.windows?.length" class="subtle">暂无窗口数据</span></div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div v-if="!card.view.all && !card.view.groups.length" class="healthy-state"><span class="healthy-icon"><ui-icon name="check"></ui-icon></span><div><strong>当前监控范围内无异常</strong><p>没有余额不足的分组或额度告急的账号</p></div></div>
+                  <footer class="server-summary"><span><i class="status-dot" :class="cardStatus(card).tone"></i>{{ card.view.lowGroupCount }} 个不足分组<span class="summary-divider">/</span>{{ card.view.urgentAccountCount }} 个告急账号</span><span v-if="card.error">上次成功读取 {{ formatTime(card.generatedAt) }}</span><span v-else>单账号剩余阈值 {{ form.quotaRemainPercent }}%</span></footer>
+                </template>
+              </template>
+            </article>
+            <div v-if="!loading && !visibleMonitorCards.length" class="monitor-empty"><ui-icon :name="monitorCards.length ? 'search' : 'server'"></ui-icon><h3>{{ monitorCards.length ? '没有匹配的服务器或账号' : '没有启用监控的服务器' }}</h3><p>{{ monitorCards.length ? '试试其他关键词，或调整筛选条件' : '添加并启用服务器后，监控数据会显示在这里' }}</p><button v-if="monitorCards.length" type="button" class="ghost" @click="clearMonitorFilters">清除筛选</button><button v-else type="button" class="ghost" @click="openConfig">前往配置</button></div>
+          </div>
+          <footer class="monitor-footnote"><span>余额口径：管理台预计总费用</span><span><i class="status-dot neutral"></i>刷新监控不会发送告警</span></footer>
+        </section>
+      </div>
     </main>
   </div>
   <script src="/vendor/vue.global.prod.js"></script>
-  <script>
-    const { createApp, reactive, ref, onMounted, onBeforeUnmount } = Vue;
+  <script type="module">
+    import { cardStatus, summarizeCards, filterCards, moneyNumber, balancePercent, percentText, windowPercent, meterWidth } from '/monitor-view.js';
+    const { createApp, computed, reactive, ref, onMounted, onBeforeUnmount } = Vue;
+    const MONITOR_REFRESH_MS = 30000;
 
     function blankServer(id) {
       return {
@@ -541,8 +650,15 @@
     }
 
     createApp({
+      components: {
+        UiIcon: {
+          props: ['name'],
+          template: '<svg class="ui-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use :href="`/vendor/lucide-sprite.svg#${name}`"></use></svg>'
+        }
+      },
       setup() {
         const loading = ref(true);
+        const previewMode = ref(false);
         const saving = ref(false);
         const showWebhook = ref(false);
         const status = ref('');
@@ -550,7 +666,14 @@
         const checking = ref(false);
         const scheduleEnabled = ref(false);
         const scheduleBusy = ref(false);
+        const page = ref('monitor');
+        const selectedServer = ref('');
+        const monitorQuery = ref('');
+        const attentionOnly = ref(false);
+        const expandedGroups = reactive({});
+        const monitorStarted = ref(false);
         const catalogs = reactive({});
+        const serverViews = reactive({});
         const form = reactive({
           webhookUrl: '',
           quotaRemainPercent: 20,
@@ -561,10 +684,74 @@
           servers: []
         });
         let groupTimer = 0;
+        let monitorTimer = 0;
+        let lastSweep = 0;
 
         function groupState(server) {
           if (!catalogs[server.uid]) catalogs[server.uid] = { groups: [], loading: false, busy: false, error: '' };
           return catalogs[server.uid];
+        }
+
+        function viewState(id) {
+          if (!serverViews[id]) serverViews[id] = { loading: false, error: '', generatedAt: '', view: null };
+          return serverViews[id];
+        }
+
+        const monitorCards = computed(() => form.servers
+          .filter((server) => server.enabled !== false)
+          .map((server) => {
+            const state = serverViews[server.id] || { loading: false, error: '', generatedAt: '', view: null };
+            return {
+              uid: server.uid,
+              id: server.id,
+              name: server.name,
+              threshold: server.estimatedCostThreshold,
+              skeleton: !state.view && !state.error,
+              loading: Boolean(state.loading),
+              error: state.error,
+              generatedAt: state.generatedAt,
+              view: state.view
+            };
+          }));
+        const monitorActive = computed(() => monitorCards.value.some((card) => card.loading));
+        const monitorBusy = computed(() => monitorCards.value.length > 0 && monitorCards.value.every((card) => card.loading));
+        const monitorSummary = computed(() => summarizeCards(monitorCards.value));
+        const visibleMonitorCards = computed(() => filterCards(monitorCards.value, {
+          serverId: selectedServer.value,
+          query: monitorQuery.value,
+          attentionOnly: attentionOnly.value
+        }));
+
+        function detailsId(serverId, group) {
+          return `accounts-${encodeURIComponent(JSON.stringify([serverId, groupKey(group)]))}`;
+        }
+
+        function groupExpanded(serverId, group) {
+          return expandedGroups[detailsId(serverId, group)] !== false;
+        }
+
+        function toggleDetails(serverId, group) {
+          expandedGroups[detailsId(serverId, group)] = !groupExpanded(serverId, group);
+        }
+
+        function clearMonitorFilters() {
+          selectedServer.value = '';
+          monitorQuery.value = '';
+          attentionOnly.value = false;
+        }
+
+        function platformClass(platform) {
+          const value = String(platform || '').toLowerCase();
+          return ['openai', 'anthropic', 'gemini', 'grok'].includes(value) ? value : 'unknown';
+        }
+
+        function platformInitial(platform) {
+          return String(platform || '?').slice(0, 1).toUpperCase();
+        }
+
+        function formatTime(value) {
+          const date = new Date(value);
+          return Number.isNaN(date.getTime()) ? '--' : date.toLocaleTimeString('zh-CN', { hour12: false });
         }
 
         function canLoadGroups(server) {
@@ -572,6 +759,7 @@
         }
 
         function applyConfig(config) {
+          previewMode.value = config.preview === true;
           form.webhookUrl = config.webhookUrl || '';
           form.quotaRemainPercent = config.quotaRemainPercent;
           form.cooldownMinutes = config.cooldownMinutes;
@@ -592,7 +780,6 @@
             groupScope: server.groupScope === 'selected' ? 'selected' : 'all',
             groups: (server.groups || []).map((group) => ({ id: group.id ?? null, name: group.name }))
           }));
-          if (form.servers.length === 0) form.servers.push(blankServer('server1'));
         }
 
         async function load() {
@@ -604,7 +791,8 @@
             const body = await response.json();
             if (!response.ok) throw new Error(body.message || '读取配置失败');
             applyConfig(body);
-            refreshGroups();
+            if (page.value === 'config') refreshGroups();
+            if (page.value === 'monitor') refreshMonitor();
           } catch (error) {
             tone.value = 'bad';
             status.value = error.message;
@@ -745,6 +933,82 @@
           return group.id == null ? `name:${group.name}` : `id:${group.id}`;
         }
 
+        function formatStamp(value) {
+          if (!value) return '';
+          const date = new Date(value);
+          return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN', { hour12: false });
+        }
+
+        function loadServer(serverId) {
+          const id = String(serverId || '').trim();
+          if (!id) return false;
+          const state = viewState(id);
+          if (state.loading) return false;
+          state.loading = true;
+          if (state.view && !state.view.error) state.error = '';
+          readServer(id, state);
+          return true;
+        }
+
+        async function readServer(id, state) {
+          try {
+            const response = await fetch(`/api/monitor?server=${encodeURIComponent(id)}`);
+            const body = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(body.message || '读取监控失败');
+            const next = body.server || null;
+            if (!next) throw new Error(body.message || '读取监控失败');
+            if (next.error && state.view && !state.view.error) {
+              state.error = next.error;
+            } else {
+              state.view = next;
+              state.generatedAt = body.generatedAt || '';
+              state.error = '';
+            }
+          } catch (error) {
+            state.error = error.message;
+          } finally {
+            state.loading = false;
+          }
+        }
+
+        function refreshMonitor() {
+          const enabled = form.servers.filter((server) => server.enabled !== false && String(server.id || '').trim());
+          if (enabled.length === 0) return;
+          let started = false;
+          for (const server of enabled) {
+            if (loadServer(server.id)) started = true;
+          }
+          if (!started) return;
+          lastSweep = Date.now();
+          monitorStarted.value = true;
+        }
+
+        function startMonitorTimer() {
+          stopMonitorTimer();
+          monitorTimer = window.setInterval(() => {
+            if (page.value === 'monitor') refreshMonitor();
+          }, MONITOR_REFRESH_MS);
+        }
+
+        function stopMonitorTimer() {
+          if (!monitorTimer) return;
+          window.clearInterval(monitorTimer);
+          monitorTimer = 0;
+        }
+
+        function openConfig() {
+          page.value = 'config';
+          stopMonitorTimer();
+          if (!loading.value) refreshGroups();
+        }
+
+        function openMonitor() {
+          page.value = 'monitor';
+          startMonitorTimer();
+          if (loading.value) return;
+          if (!monitorStarted.value || Date.now() - lastSweep >= MONITOR_REFRESH_MS) refreshMonitor();
+        }
+
         async function loadGroups(server, quiet = false) {
           const state = groupState(server);
           if (!canLoadGroups(server)) {
@@ -789,7 +1053,7 @@
         function onKeydown(event) {
           if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
             event.preventDefault();
-            if (!saving.value && !loading.value) save();
+            if (page.value === 'config' && !saving.value && !loading.value) save();
           }
         }
 
@@ -797,17 +1061,24 @@
           window.addEventListener('keydown', onKeydown);
           load();
           loadSchedule();
-          groupTimer = window.setInterval(refreshGroups, 30000);
+          startMonitorTimer();
+          groupTimer = window.setInterval(() => {
+            if (page.value === 'config') refreshGroups();
+          }, 30000);
         });
         onBeforeUnmount(() => {
           window.removeEventListener('keydown', onKeydown);
           window.clearInterval(groupTimer);
+          stopMonitorTimer();
         });
 
         return {
-          loading, saving, showWebhook, status, tone, checking, scheduleEnabled, scheduleBusy, form,
+          loading, previewMode, saving, showWebhook, status, tone, checking, scheduleEnabled, scheduleBusy, form,
+          page, monitorCards, monitorActive, monitorBusy, monitorSummary, visibleMonitorCards,
+          selectedServer, monitorQuery, attentionOnly, clearMonitorFilters,
+          cardStatus, moneyNumber, meterWidth, detailsId, groupExpanded, toggleDetails, platformClass, platformInitial, formatTime,
           save, checkOnce, toggleSchedule, addServer, removeServer, visibleGroups, isChecked, toggleGroup,
-          groupKey, loadGroups, groupState
+          groupKey, loadGroups, groupState, openConfig, openMonitor, refreshMonitor, loadServer, load, percentText, balancePercent, windowPercent, formatStamp
         };
       }
     }).mount('#app');

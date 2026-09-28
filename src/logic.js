@@ -78,6 +78,11 @@ export function getEstimatedTotalCost(account) {
   return estimatedCostFromWindow(account);
 }
 
+export function getUsedCost(payload) {
+  const cost = usageRoot(payload)?.seven_day?.window_stats?.cost;
+  return typeof cost === 'number' && Number.isFinite(cost) && cost >= 0 ? cost : null;
+}
+
 export function getAccountName(account) {
   return String(firstDefined(account, ACCOUNT_NAME_KEYS) ?? account?.id ?? '未知账号');
 }
@@ -200,6 +205,43 @@ export function readGroupCatalog(payload) {
     const platform = item.platform ?? item.platform_name ?? item.platformName;
     return platform ? { ...group, platform: String(platform) } : group;
   }).filter(Boolean));
+}
+
+export function accountListQuery(page, pageSize, { status = 'active', lite = false } = {}) {
+  const params = new URLSearchParams();
+  params.set('page', String(page));
+  params.set('page_size', String(pageSize));
+  if (status) params.set('status', status);
+  if (lite) params.set('lite', '1');
+  return `/admin/accounts?${params.toString()}`;
+}
+
+export function accountListKeepsMembership(accounts) {
+  if (!Array.isArray(accounts) || accounts.length === 0) return true;
+  return accounts.some((account) => (
+    Array.isArray(account?.group_ids)
+    || Array.isArray(account?.groups)
+    || Array.isArray(account?.account_groups)
+  ));
+}
+
+export function attachGroupCatalog(accounts, catalog) {
+  const byId = new Map();
+  for (const group of catalog || []) {
+    if (!group || group.id == null || group.id === '') continue;
+    byId.set(String(group.id), group);
+  }
+  return (accounts || []).map((account) => {
+    if (!account || typeof account !== 'object') return account;
+    if (getGroupNames(account).length > 0) return account;
+    const ids = Array.isArray(account.group_ids) ? account.group_ids : [];
+    if (ids.length === 0) return account;
+    const groups = ids.map((id) => {
+      const known = byId.get(String(id));
+      return { id: known?.id ?? id, name: known?.name ? String(known.name) : `分组#${id}` };
+    });
+    return { ...account, groups };
+  });
 }
 
 function collectGroupItems(payload) {
@@ -358,6 +400,68 @@ export function getQuotaAlerts(usage, account, thresholdPercent) {
     }
   }
   return alerts;
+}
+
+function sumUsedCost(records) {
+  const values = (records || []).map((record) => record.usedCost).filter((value) => Number.isFinite(value));
+  return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : null;
+}
+
+function presentUrgentAccount(record) {
+  return {
+    id: record.account?.id ?? null,
+    name: getAccountName(record.account),
+    groupName: getGroupName(record.account),
+    platform: getPlatformName(record.account),
+    estimatedCost: record.estimatedCost,
+    usedCost: Number.isFinite(record.usedCost) ? record.usedCost : null,
+    windows: (record.quotaAlerts || []).map((alert) => ({
+      windowName: alert.windowName,
+      remainingPercent: alert.remainingPercent
+    }))
+  };
+}
+
+export function buildMonitorView(server, result) {
+  const threshold = server.estimatedCostThreshold;
+  const records = result.records || [];
+  const monitored = resolveMonitoredGroups(server, records.map((record) => record.account));
+  const inScope = records.filter((record) => monitored.some((group) => accountMatchesGroup(record.account, group)));
+  const groups = (result.groupCosts || []).map((group) => {
+    const members = inScope.filter((record) => accountMatchesGroup(record.account, group));
+    const urgent = members.filter((record) => (record.quotaAlerts || []).length > 0);
+    return {
+      id: group.id ?? null,
+      name: group.name,
+      estimatedCost: group.estimatedCost,
+      usedCost: sumUsedCost(members),
+      low: group.estimatedCost < threshold,
+      urgentCount: urgent.length,
+      accounts: urgent.map(presentUrgentAccount)
+    };
+  }).filter((group) => group.low || group.urgentCount > 0);
+
+  const urgentIds = new Set();
+  for (const record of inScope) {
+    if ((record.quotaAlerts || []).length === 0) continue;
+    urgentIds.add(record.account?.id ?? getAccountName(record.account));
+  }
+
+  const allLow = server.monitorAllAccounts !== false && result.allEstimatedCost < threshold;
+  return {
+    id: server.id,
+    name: server.name,
+    threshold,
+    lowGroupCount: groups.filter((group) => group.low).length,
+    urgentAccountCount: urgentIds.size,
+    all: allLow ? {
+      estimatedCost: result.allEstimatedCost,
+      usedCost: sumUsedCost(records),
+      accountCount: result.accountCount
+    } : null,
+    groups,
+    error: null
+  };
 }
 
 export function unwrapList(payload) {
@@ -600,4 +704,63 @@ export function buildServerFailureAlert(server, message) {
 
 export function formatAlertMessage(alerts) {
   return `🚨 账号额度警报\n\n${alerts.map((alert) => alert.text).join('\n')}`;
+}
+
+export function createInspectionGate() {
+  let runPromise = null;
+  const monitorReads = new Map();
+
+  function busy() {
+    const error = new Error('巡检进行中');
+    error.statusCode = 409;
+    throw error;
+  }
+
+  function checkOnce(run) {
+    if (runPromise || monitorReads.size > 0) busy();
+    runPromise = Promise.resolve()
+      .then(run)
+      .finally(() => {
+        runPromise = null;
+      });
+    return runPromise;
+  }
+
+  function monitorServer(key, read) {
+    const existing = monitorReads.get(key);
+    if (existing) return existing;
+    const currentRun = runPromise;
+    const promise = (async () => {
+      if (currentRun) {
+        try {
+          await currentRun;
+        } catch {
+          // 告警巡检自己报告失败，监控仍继续读取当前用量。
+        }
+      }
+      return read();
+    })().finally(() => {
+      if (monitorReads.get(key) === promise) monitorReads.delete(key);
+    });
+    monitorReads.set(key, promise);
+    return promise;
+  }
+
+  function monitorSnapshot(read) {
+    return monitorServer('*', read);
+  }
+
+  function currentMonitor() {
+    const pending = [...monitorReads.values()];
+    return pending.length > 0 ? Promise.all(pending) : null;
+  }
+
+  return {
+    checkOnce,
+    monitorServer,
+    monitorSnapshot,
+    currentRun: () => runPromise,
+    currentMonitor,
+    isChecking: () => Boolean(runPromise)
+  };
 }

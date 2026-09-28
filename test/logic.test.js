@@ -6,6 +6,7 @@ import {
   isMonitorableAccount,
   accountInGroup,
   getGroupName,
+  getGroupNames,
   resolveAccountCost,
   shouldFetchUsage,
   usageQuery,
@@ -15,15 +16,23 @@ import {
   resolveMonitoredGroups,
   summarizeGroupCosts,
   readGroupCatalog,
+  accountListQuery,
+  accountListKeepsMembership,
+  attachGroupCatalog,
   buildServerAlerts,
   buildServerFailureAlert,
-  formatAlertMessage
+  buildMonitorView,
+  getUsedCost,
+  formatAlertMessage,
+  createInspectionGate
 } from '../src/logic.js';
 import { toStoredConfig } from '../src/config-store.js';
 
 test('uses estimated total cost and does not fall back to balance fields', () => {
   assert.equal(getEstimatedTotalCost({ estimated_total_cost: '123.45', prepaid_balance: 999 }), 123.45);
   assert.equal(getEstimatedTotalCost({ prepaid_balance: 999, quota_limit: 1000 }), null);
+  assert.equal(getUsedCost({ seven_day: { utilization: 25, window_stats: { cost: 10 } } }), 10);
+  assert.equal(getUsedCost({ estimated_total_cost: 5, prepaid_balance: 9 }), null);
 });
 
 test('missing 5h window does not trigger a 5h alert', () => {
@@ -243,6 +252,117 @@ test('estimated cost threshold belongs to each server', () => {
   assert.equal(stored.servers[0].estimatedCostThreshold, 300);
 });
 
+test('monitor view lists short groups and urgent accounts only', () => {
+  const view = buildMonitorView({
+    id: 'japan',
+    name: '日本站',
+    estimatedCostThreshold: 500,
+    monitorAllAccounts: true,
+    groupScope: 'all'
+  }, {
+    allEstimatedCost: 100,
+    accountCount: 3,
+    groupCosts: [
+      { id: 3, name: 'rotation', estimatedCost: 80 },
+      { id: 9, name: 'grok', estimatedCost: 900 }
+    ],
+    records: [
+      {
+        account: { id: 'a1', name: 'low', groups: [{ id: 3, name: 'rotation' }], platform: 'openai' },
+        estimatedCost: 40,
+        usedCost: 15,
+        quotaAlerts: [{ windowName: '5h', remainingPercent: 8 }]
+      },
+      {
+        account: { id: 'a2', name: 'ok', groups: [{ id: 3, name: 'rotation' }], platform: 'openai' },
+        estimatedCost: 40,
+        usedCost: 5,
+        quotaAlerts: []
+      },
+      {
+        account: { id: 'a3', name: 'grok-user', groups: [{ id: 9, name: 'grok' }], platform: 'openai' },
+        estimatedCost: 900,
+        usedCost: 100,
+        quotaAlerts: [{ windowName: '7d', remainingPercent: 4 }]
+      }
+    ]
+  });
+
+  assert.equal(view.lowGroupCount, 1);
+  assert.equal(view.urgentAccountCount, 2);
+  assert.equal(view.all.estimatedCost, 100);
+  assert.equal(view.all.usedCost, 120);
+  assert.deepEqual(view.groups.map((group) => group.name), ['rotation', 'grok']);
+  assert.equal(view.groups[0].usedCost, 20);
+  assert.equal(view.groups[0].accounts.length, 1);
+  assert.equal(view.groups[0].accounts[0].name, 'low');
+  assert.equal(view.groups[1].low, false);
+  assert.equal(view.groups[1].accounts[0].windows[0].windowName, '7d');
+});
+
+test('monitor reads share one snapshot and wait out an alert check', async () => {
+  const gate = createInspectionGate();
+  let releaseCheck;
+  const check = gate.checkOnce(() => new Promise((resolve) => {
+    releaseCheck = resolve;
+  }));
+  let reads = 0;
+  const first = gate.monitorSnapshot(async () => {
+    reads += 1;
+    return { servers: ['japan'] };
+  });
+  const second = gate.monitorSnapshot(async () => {
+    reads += 1;
+    return { servers: ['usa'] };
+  });
+  assert.equal(first, second);
+  assert.equal(reads, 0);
+  assert.throws(() => gate.checkOnce(() => ({ sent: 1 })), (error) => error.statusCode === 409);
+  await Promise.resolve();
+  releaseCheck({ sent: 0 });
+  assert.deepEqual(await first, { servers: ['japan'] });
+  assert.equal(reads, 1);
+  assert.deepEqual(await check, { sent: 0 });
+
+  let releaseRead;
+  const view = gate.monitorSnapshot(() => new Promise((resolve) => {
+    releaseRead = () => resolve({ servers: [] });
+  }));
+  assert.throws(() => gate.checkOnce(() => ({ sent: 1 })), (error) => error.statusCode === 409);
+  releaseRead();
+  assert.deepEqual(await view, { servers: [] });
+  assert.deepEqual(await gate.checkOnce(async () => ({ sent: 2 })), { sent: 2 });
+});
+
+test('a failed alert check does not reject the following monitor read', async () => {
+  const gate = createInspectionGate();
+  const check = gate.checkOnce(async () => {
+    throw new Error('upstream failed');
+  });
+  const view = gate.monitorSnapshot(async () => ({ servers: [1] }));
+  await assert.rejects(check, /upstream failed/);
+  assert.deepEqual(await view, { servers: [1] });
+});
+
+test('monitor reads for different servers run at the same time', async () => {
+  const gate = createInspectionGate();
+  let releaseJapan;
+  const japan = gate.monitorServer('japan', () => new Promise((resolve) => {
+    releaseJapan = () => resolve('japan');
+  }));
+  let usStarted = false;
+  const us = gate.monitorServer('us', async () => {
+    usStarted = true;
+    return 'us';
+  });
+  assert.equal(await us, 'us');
+  assert.equal(usStarted, true);
+  assert.throws(() => gate.checkOnce(() => ({ sent: 1 })), (error) => error.statusCode === 409);
+  releaseJapan();
+  assert.equal(await japan, 'japan');
+  assert.deepEqual(await gate.checkOnce(async () => ({ sent: 3 })), { sent: 3 });
+});
+
 test('group membership matches id or name and all-scope discovers account groups', () => {
   const rotation = { id: 'a1', groups: [{ id: 3, name: 'rotation' }] };
   const legacy = { id: 'a2', group_name: 'grok' };
@@ -262,6 +382,27 @@ test('group membership matches id or name and all-scope discovers account groups
 test('group catalog reads the admin groups payload', () => {
   const groups = readGroupCatalog({ data: { groups: [{ id: 1, name: 'rotation', platform: 'openai' }, { name: 'rotation' }] } });
   assert.deepEqual(groups, [{ id: 1, name: 'rotation', platform: 'openai' }]);
+});
+
+test('active lite account lists keep ids and can be named from the group catalog', () => {
+  assert.equal(
+    accountListQuery(1, 100, { status: 'active', lite: true }),
+    '/admin/accounts?page=1&page_size=100&status=active&lite=1'
+  );
+  assert.equal(accountListKeepsMembership([{ id: 1, group_ids: [3] }]), true);
+  assert.equal(accountListKeepsMembership([{ id: 1, name: 'plain' }]), false);
+
+  const [account] = attachGroupCatalog(
+    [{ id: 'a1', group_ids: [3, 9], status: 'active', schedulable: true }],
+    [{ id: 3, name: 'rotation' }]
+  );
+  assert.deepEqual(getGroupNames(account), ['rotation', '分组#9']);
+  assert.equal(accountMatchesGroup(account, { id: 3, name: 'renamed' }), true);
+  const [named] = attachGroupCatalog(
+    [{ id: 'a2', group_ids: [3], groups: [{ id: 3, name: 'kept' }] }],
+    [{ id: 3, name: 'rotation' }]
+  );
+  assert.deepEqual(getGroupNames(named), ['kept']);
 });
 
 test('monitor config rejects an unknown group scope', () => {
