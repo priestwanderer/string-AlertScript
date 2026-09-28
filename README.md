@@ -29,7 +29,11 @@ node src/index.js --once
 - 缺少 `5h` 窗口时，不发送 `5h` 告警。
 - 相同告警在 `ALERT_COOLDOWN_MINUTES` 内只发送一次。
 
-程序只读取接口实际返回的预计总费用字段，不会用预付余额、钱包余额或配额余额替代。
+预计总费用与管理台一致：优先使用接口直接返回的预计总费用字段；否则在 7 日窗口的 `utilization` 和 `window_stats.cost` 都是大于 0 的有限数字时，按 `cost * 100 / utilization` 估算。不会用预付余额、钱包余额或配额余额替代。成功拿到用量但无法估算时按 0 计入。
+
+用量查询也与管理台一致：Anthropic OAuth / Setup Token 使用 `source=passive`，其余会展示用量的账号走主动查询，并优先使用批量接口。管理台不查询用量的账号不参与合计，也不会让巡检失败。用量获取失败则中止本次巡检。
+
+`OPENAI_GROUP_NAME` 必须与账号 `groups[].name` 的管理台显示一致。
 
 ## 测试
 

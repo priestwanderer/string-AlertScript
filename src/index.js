@@ -5,12 +5,14 @@ import {
   formatNumber,
   formatResetTime,
   getAccountName,
-  getEstimatedTotalCost,
-  getGroupName,
   getQuotaAlerts,
   getPaginationTotal,
   isMonitorableAccount,
-  unwrapList
+  accountInGroup,
+  resolveAccountCost,
+  shouldFetchUsage,
+  unwrapList,
+  usageQuery
 } from './logic.js';
 
 const DEFAULT_BASE_URL = 'http://103.204.174.231:8080';
@@ -116,42 +118,85 @@ async function getAllAccounts(token) {
   return accounts;
 }
 
-async function getUsage(token, accountId) {
-  return request(`/admin/accounts/${encodeURIComponent(accountId)}/usage?source=passive`, {}, token);
+function usageFor(map, accountId) {
+  if (!map || typeof map !== 'object') return undefined;
+  if (Object.prototype.hasOwnProperty.call(map, accountId)) return map[accountId];
+  const key = String(accountId);
+  if (Object.prototype.hasOwnProperty.call(map, key)) return map[key];
+  return undefined;
+}
+
+async function loadUsageMap(token, accounts) {
+  const ids = accounts.map((account) => account.id);
+  try {
+    const payload = await request('/admin/accounts/usage/batch', {
+      method: 'POST',
+      body: JSON.stringify({ account_ids: ids, force: false })
+    }, token);
+    const data = payload?.data && typeof payload.data === 'object' && !Array.isArray(payload.data)
+      ? payload.data
+      : payload;
+    if (data?.usage && typeof data.usage === 'object') {
+      return {
+        usage: data.usage,
+        errors: data.errors && typeof data.errors === 'object' ? data.errors : {}
+      };
+    }
+  } catch (error) {
+    console.warn(`批量获取用量失败，改为逐个查询：${error.message}`);
+  }
+
+  const usage = {};
+  const errors = {};
+  for (const account of accounts) {
+    try {
+      usage[account.id] = await request(
+        `/admin/accounts/${encodeURIComponent(account.id)}/usage${usageQuery(account)}`,
+        {},
+        token
+      );
+    } catch (error) {
+      errors[account.id] = error.message;
+    }
+  }
+  return { usage, errors };
 }
 
 async function inspect(token) {
   const allAccounts = (await getAllAccounts(token)).filter(isMonitorableAccount);
+  const targets = allAccounts.filter(shouldFetchUsage);
+  const loaded = targets.length > 0 ? await loadUsageMap(token, targets) : { usage: {}, errors: {} };
   const records = [];
   const missingCost = [];
 
-  for (const account of allAccounts) {
-    let usage = null;
-    try {
-      usage = await getUsage(token, account.id);
-    } catch (error) {
-      console.warn(`获取账号“${getAccountName(account)}”用量失败：${error.message}`);
+  for (const account of targets) {
+    const usageItem = usageFor(loaded.usage, account.id);
+    const fetchFailed = usageItem == null;
+    if (fetchFailed) {
+      const reason = usageFor(loaded.errors, account.id);
+      const detail = typeof reason === 'string' ? reason : reason?.message;
+      console.warn(`获取账号“${getAccountName(account)}”用量失败${detail ? `：${detail}` : ''}`);
     }
 
-    const estimatedCost = getEstimatedTotalCost(account) ?? getEstimatedTotalCost(usage);
-    if (estimatedCost === null) {
+    const resolved = resolveAccountCost(account, fetchFailed ? null : usageItem, { fetchFailed });
+    if (resolved.missing) {
       missingCost.push(getAccountName(account));
     }
 
     records.push({
       account,
-      estimatedCost,
-      quotaAlerts: usage ? getQuotaAlerts(usage, account, config.quotaRemainPercent) : []
+      estimatedCost: resolved.cost ?? 0,
+      quotaAlerts: usageItem ? getQuotaAlerts(usageItem, account, config.quotaRemainPercent) : []
     });
   }
 
   if (missingCost.length > 0) {
-    throw new Error(`以下账号没有预计总费用字段：${missingCost.join('、')}`);
+    throw new Error(`以下账号用量获取失败，无法计算预计总费用：${missingCost.join('、')}`);
   }
 
   const allEstimatedCost = records.reduce((sum, record) => sum + record.estimatedCost, 0);
   const openaiEstimatedCost = records
-    .filter(({ account }) => getGroupName(account) === config.openaiGroupName)
+    .filter(({ account }) => accountInGroup(account, config.openaiGroupName))
     .reduce((sum, record) => sum + record.estimatedCost, 0);
   const quotaAlerts = records.flatMap((record) => record.quotaAlerts);
 

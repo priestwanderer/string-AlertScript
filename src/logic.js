@@ -43,17 +43,110 @@ function toFiniteNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function usageRoot(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  if (payload.seven_day || payload.five_hour) return payload;
+  for (const key of ['data', 'usage']) {
+    const nested = payload[key];
+    if (nested && typeof nested === 'object' && (nested.seven_day || nested.five_hour)) return nested;
+  }
+  return payload;
+}
+
+function estimatedCostFromWindow(payload) {
+  const sevenDay = usageRoot(payload)?.seven_day;
+  const utilization = sevenDay?.utilization;
+  const currentCost = sevenDay?.window_stats?.cost;
+  if (
+    typeof utilization !== 'number' ||
+    typeof currentCost !== 'number' ||
+    !Number.isFinite(utilization) ||
+    !Number.isFinite(currentCost) ||
+    utilization <= 0 ||
+    currentCost <= 0
+  ) {
+    return null;
+  }
+
+  const estimate = (currentCost * 100) / utilization;
+  return Number.isFinite(estimate) && estimate > 0 ? estimate : null;
+}
+
 export function getEstimatedTotalCost(account) {
-  const value = firstDefinedDeep(account, ESTIMATED_COST_KEYS);
-  return toFiniteNumber(value);
+  const explicit = toFiniteNumber(firstDefinedDeep(account, ESTIMATED_COST_KEYS));
+  if (explicit !== null) return explicit;
+  return estimatedCostFromWindow(account);
 }
 
 export function getAccountName(account) {
   return String(firstDefined(account, ACCOUNT_NAME_KEYS) ?? account?.id ?? '未知账号');
 }
 
+function groupNameFromItem(group) {
+  if (typeof group === 'string' && group.trim() !== '') return group.trim();
+  if (!group || typeof group !== 'object') return '';
+  const name = group.name ?? group.group_name ?? group.groupName;
+  return typeof name === 'string' && name.trim() !== '' ? name.trim() : '';
+}
+
+export function getGroupNames(account) {
+  const names = [];
+  if (Array.isArray(account?.groups)) {
+    for (const group of account.groups) {
+      const name = groupNameFromItem(group);
+      if (name) names.push(name);
+    }
+  }
+  const legacyName = groupNameFromItem(firstDefined(account, GROUP_KEYS));
+  if (legacyName) names.push(legacyName);
+  return [...new Set(names)];
+}
+
 export function getGroupName(account) {
-  return String(firstDefined(account, GROUP_KEYS) ?? '未分组');
+  return getGroupNames(account)[0] ?? '未分组';
+}
+
+export function accountInGroup(account, groupName) {
+  if (!groupName) return false;
+  return getGroupNames(account).includes(groupName);
+}
+
+function accountType(account) {
+  return String(account?.type ?? account?.account_type ?? '').toLowerCase();
+}
+
+function accountPlatform(account) {
+  return String(account?.platform ?? '').toLowerCase();
+}
+
+export function shouldFetchUsage(account) {
+  const platform = accountPlatform(account);
+  const type = accountType(account);
+  if (platform === 'anthropic') return type === 'oauth' || type === 'setup-token';
+  if (platform === 'gemini') return true;
+  if (platform === 'antigravity' || platform === 'grok' || platform === 'openai') return type === 'oauth';
+  return false;
+}
+
+export function usageQuery(account) {
+  const platform = accountPlatform(account);
+  const type = accountType(account);
+  if (platform === 'anthropic' && (type === 'oauth' || type === 'setup-token')) return '?source=passive';
+  return '';
+}
+
+export function resolveAccountCost(account, usage, { fetchFailed = false } = {}) {
+  const fromAccount = toFiniteNumber(firstDefinedDeep(account, ESTIMATED_COST_KEYS));
+  const fromUsage = usage ? getEstimatedTotalCost(usage) : null;
+  const cost = fromAccount ?? fromUsage;
+
+  if (!shouldFetchUsage(account)) {
+    return { include: cost !== null, cost: cost ?? 0, missing: false };
+  }
+  if (fetchFailed && fromAccount === null) {
+    return { include: false, cost: null, missing: true };
+  }
+  return { include: true, cost: cost ?? 0, missing: false };
 }
 
 export function getPlatformName(account) {
