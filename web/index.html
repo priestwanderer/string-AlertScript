@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>String 额度告警</title>
+  <style>
+    :root {
+      --canvas: #f8f8f4;
+      --ink: #0c0d12;
+      --ink-2: #52545d;
+      --ink-3: #8d8f98;
+      --line: rgba(12, 13, 18, 0.1);
+      --line-strong: rgba(12, 13, 18, 0.18);
+      --blue: #5267ff;
+      --soft: #f1f1ec;
+      --green: #16a36f;
+      --danger: #c2413a;
+      --header: 64px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Courier New", monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    [v-cloak] { display: none; }
+
+    html, body { margin: 0; min-width: 320px; }
+
+    body {
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(248, 248, 244, 0.96) 220px),
+        var(--canvas);
+      color: var(--ink);
+      font-family: "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Arial, sans-serif;
+      letter-spacing: 0;
+    }
+
+    button, input { font: inherit; letter-spacing: 0; }
+
+    button { cursor: pointer; }
+
+    button:disabled { cursor: default; opacity: 0.45; }
+
+    .top {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      min-height: var(--header);
+      padding: 12px 24px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(248, 248, 244, 0.94);
+    }
+
+    .brand { display: flex; align-items: baseline; min-width: 0; gap: 10px; }
+
+    .mark {
+      font-family: Palatino, "Palatino Linotype", "Iowan Old Style", Georgia, serif;
+      font-size: 28px;
+      line-height: 1;
+    }
+
+    .product { color: var(--ink-2); font-size: 14px; white-space: nowrap; }
+
+    main { max-width: 1120px; margin: 0 auto; padding: 24px 24px 72px; }
+
+    .status { min-height: 22px; margin: 0 0 20px; font-size: 14px; overflow-wrap: anywhere; }
+
+    .status.ok { color: var(--green); }
+
+    .status.bad { color: var(--danger); }
+
+    section + section { margin-top: 32px; }
+
+    .section-head, .server-head, .group-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    h2 {
+      margin: 0;
+      font-family: Palatino, "Palatino Linotype", Georgia, "Songti SC", serif;
+      font-size: 22px;
+      font-weight: 500;
+      line-height: 1.2;
+    }
+
+    .field { min-width: 0; }
+
+    .field > span, .switch-copy {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--ink-2);
+      font-size: 13px;
+    }
+
+    input[type="text"], input[type="password"], input[type="number"] {
+      width: 100%;
+      height: 40px;
+      padding: 0 12px;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+    }
+
+    input:focus { outline: 2px solid rgba(82, 103, 255, 0.35); border-color: var(--blue); }
+
+    .unit-input { position: relative; }
+
+    .unit-input input { padding-right: 48px; }
+
+    .unit-input input[type="number"] { appearance: textfield; }
+
+    .unit-input input[type="number"]::-webkit-outer-spin-button,
+    .unit-input input[type="number"]::-webkit-inner-spin-button { appearance: none; margin: 0; }
+
+    .unit {
+      position: absolute;
+      top: 0;
+      right: 12px;
+      display: flex;
+      align-items: center;
+      height: 40px;
+      color: var(--ink-3);
+      font-size: 13px;
+      pointer-events: none;
+    }
+
+    .secret { display: grid; grid-template-columns: minmax(0, 1fr) 40px; gap: 8px; }
+
+    .rules {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(160px, 280px));
+      gap: 12px;
+      align-items: end;
+      margin-top: 16px;
+    }
+
+    .switch-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      height: 40px;
+      padding: 0 12px;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: #fff;
+    }
+
+    .switch-copy { margin: 0; color: var(--ink); font-size: 14px; white-space: nowrap; }
+
+    .switch-copy.stack {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 2px;
+      line-height: 1.25;
+    }
+
+    .switch-copy.stack small { color: var(--ink-3); font-size: 12px; line-height: 1.3; }
+
+    .balance-alert { height: auto; min-height: 40px; margin-top: 16px; padding-top: 7px; padding-bottom: 7px; }
+
+    .balance-row {
+      display: flex;
+      align-items: end;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .balance-row .balance-alert { flex: 1 1 auto; min-width: 0; margin-top: 0; }
+
+    .balance-row .threshold { flex: 0 0 148px; }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .actions .switch-row { flex: 0 1 240px; }
+
+    .actions .ghost { flex: 0 0 auto; }
+
+    .schedule {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+
+    .interval { position: relative; width: 112px; flex: 0 0 112px; }
+
+    .interval input { height: 40px; padding-right: 42px; }
+
+    .interval .unit { right: 10px; }
+
+    .switch {
+      position: relative;
+      width: 44px;
+      height: 24px;
+      padding: 0;
+      border: 0;
+      border-radius: 8px;
+      background: #d8d8d2;
+    }
+
+    .switch[aria-checked="true"] { background: var(--blue); }
+
+    .switch i {
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 20px;
+      height: 20px;
+      border-radius: 6px;
+      background: #fff;
+      transition: transform 0.15s ease;
+    }
+
+    .switch[aria-checked="true"] i { transform: translateX(20px); }
+
+    .primary, .ghost, .icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      height: 40px;
+      border-radius: 8px;
+    }
+
+    .primary { min-width: 72px; padding: 0 16px; border: 0; background: var(--ink); color: #fff; }
+
+    .ghost { padding: 0 12px; border: 1px solid var(--line-strong); background: #fff; color: var(--ink); }
+
+    .icon { width: 40px; padding: 0; border: 1px solid var(--line-strong); background: #fff; color: var(--ink); }
+
+    .server-head .icon { flex: 0 0 40px; }
+
+    .icon svg, .ghost svg { display: block; }
+
+    .server-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 16px;
+      align-items: stretch;
+    }
+
+    .server {
+      min-width: 0;
+      padding: 16px;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: #fff;
+    }
+
+    .server-head {
+      align-items: flex-start;
+      min-height: 48px;
+      margin-bottom: 14px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .server-name { min-width: 0; }
+
+    .server-title {
+      display: block;
+      font-size: 16px;
+      line-height: 1.3;
+      overflow-wrap: anywhere;
+    }
+
+    .server-id {
+      display: block;
+      margin-top: 2px;
+      color: var(--ink-3);
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+
+    .server.paused { background: var(--soft); }
+
+    .server-tools { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+
+    .server-tools .switch-row { width: auto; padding-left: 10px; }
+
+    .fields { display: grid; grid-template-columns: minmax(0, 1fr) 132px; gap: 12px; }
+
+    .credentials { display: grid; grid-template-columns: 1fr; gap: 12px; margin-top: 12px; }
+
+    .span-2 { grid-column: 1 / -1; }
+
+    .group-block {
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid var(--line);
+    }
+
+    .group-label {
+      margin: 0 0 8px;
+      color: var(--ink-2);
+      font-size: 13px;
+    }
+
+    .group-head { min-height: 40px; align-items: center; flex-wrap: wrap; }
+
+    .segment { display: inline-flex; height: 36px; padding: 2px; border-radius: 8px; background: var(--soft); }
+
+    .segment button {
+      height: 32px;
+      padding: 0 12px;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--ink-2);
+    }
+
+    .segment button.active { background: #fff; color: var(--ink); box-shadow: 0 0 0 1px var(--line); }
+
+    .checks { display: grid; grid-template-columns: 1fr; gap: 8px; margin-top: 12px; }
+
+    .check {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      min-height: 36px;
+      color: var(--ink);
+      font-size: 14px;
+    }
+
+    .check input { width: 16px; height: 16px; margin-top: 2px; accent-color: var(--blue); }
+
+    .check b { font-weight: 500; overflow-wrap: anywhere; }
+
+    .muted { color: var(--ink-3); font-size: 12px; }
+
+    .group-status { min-height: 20px; margin: 8px 0 0; color: var(--danger); font-size: 13px; overflow-wrap: anywhere; }
+
+    .names { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+
+    .names span {
+      max-width: 100%;
+      padding: 6px 8px;
+      border-radius: 8px;
+      background: var(--soft);
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+
+    @media (max-width: 959px) {
+      .server-grid { grid-template-columns: 1fr; }
+      .rules { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .switch-row { grid-column: 1 / -1; }
+      .credentials { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .checks { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+    }
+
+    @media (max-width: 720px) {
+      .top, main { padding-left: 16px; padding-right: 16px; }
+      .rules, .fields, .credentials, .checks { grid-template-columns: 1fr; }
+      .switch-row { grid-column: auto; }
+      .balance-row { flex-direction: column; align-items: stretch; }
+      .balance-row .threshold { flex-basis: auto; width: 100%; }
+      .group-head, .section-head { align-items: stretch; flex-direction: column; }
+      .actions { align-items: stretch; flex-direction: column; }
+      .actions .switch-row, .actions .ghost { flex: none; width: 100%; }
+      .schedule { width: 100%; }
+      .actions .schedule .switch-row { width: auto; flex: 1 1 auto; }
+      .segment, .section-head .ghost, .group-head .ghost { width: 100%; }
+      .segment { display: flex; }
+      .segment button { flex: 1 1 0; }
+      .mark { font-size: 24px; }
+    }
+  </style>
+</head>
+<body>
+  <div id="app" v-cloak>
+    <header class="top">
+      <div class="brand">
+        <span class="mark">String</span>
+        <span class="product">额度告警</span>
+      </div>
+      <button class="primary" type="button" @click="save" :disabled="saving || loading">{{ saving ? '保存中' : '保存' }}</button>
+    </header>
+    <main>
+      <p class="status" :class="{ ok: tone === 'ok', bad: tone === 'bad' }">{{ status }}</p>
+      <section>
+        <h2>告警</h2>
+        <div class="field" style="margin-top: 16px">
+          <span>企业微信 Webhook</span>
+          <div class="secret">
+            <input :type="showWebhook ? 'text' : 'password'" v-model="form.webhookUrl" autocomplete="off" spellcheck="false">
+            <button class="icon" type="button" @click="showWebhook = !showWebhook" :title="showWebhook ? '隐藏 Webhook' : '显示 Webhook'">
+              <svg v-if="!showWebhook" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+              <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="ghost" type="button" @click="checkOnce" :disabled="checking || loading">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+            {{ checking ? '检查中' : '告警一次' }}
+          </button>
+          <div class="schedule">
+            <div class="switch-row">
+              <span class="switch-copy">定时告警</span>
+              <button class="switch" type="button" role="switch" :aria-checked="scheduleEnabled ? 'true' : 'false'" :disabled="scheduleBusy" :title="scheduleEnabled ? '关闭定时告警' : '开启定时告警'" @click="toggleSchedule">
+                <i></i>
+              </button>
+            </div>
+            <label class="interval">
+              <input type="number" min="1" aria-label="检查间隔" v-model.number="form.checkIntervalMinutes">
+              <span class="unit">分钟</span>
+            </label>
+          </div>
+        </div>
+        <div class="rules">
+          <label class="field"><span>单账号剩余</span><div class="unit-input"><input type="number" v-model.number="form.quotaRemainPercent"><span class="unit">%</span></div></label>
+          <label class="field"><span>静默时间</span><div class="unit-input"><input type="number" v-model.number="form.cooldownMinutes"><span class="unit">分钟</span></div></label>
+        </div>
+      </section>
+      <section>
+        <div class="section-head">
+          <h2>服务器</h2>
+          <button class="ghost" type="button" @click="addServer">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+            添加服务器
+          </button>
+        </div>
+        <div class="server-grid">
+          <article class="server" :class="{ paused: !server.enabled }" v-for="server in form.servers" :key="server.uid">
+            <div class="server-head">
+              <div class="server-name">
+                <strong class="server-title">{{ server.name || server.id }}</strong>
+                <span class="server-id">{{ server.id }}</span>
+              </div>
+              <div class="server-tools">
+                <div class="switch-row">
+                  <span class="switch-copy">监控</span>
+                  <button class="switch" type="button" role="switch" :aria-checked="server.enabled ? 'true' : 'false'" :title="server.enabled ? '关闭这台服务器的监控' : '开启这台服务器的监控'" @click="server.enabled = !server.enabled">
+                    <i></i>
+                  </button>
+                </div>
+                <button class="icon" type="button" title="删除服务器" @click="removeServer(server)" :disabled="form.servers.length === 1">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="fields">
+              <label class="field"><span>名称</span><input type="text" v-model="server.name"></label>
+              <label class="field"><span>标识</span><input type="text" v-model="server.id" spellcheck="false"></label>
+              <label class="field span-2"><span>地址</span><input type="text" v-model="server.baseUrl" spellcheck="false"></label>
+            </div>
+            <div class="credentials">
+              <label class="field"><span>邮箱</span><input type="text" v-model="server.email" autocomplete="off" spellcheck="false"></label>
+              <label class="field">
+                <span>密码</span>
+                <div class="secret">
+                  <input :type="server.showPassword ? 'text' : 'password'" v-model="server.password" autocomplete="new-password">
+                  <button class="icon" type="button" @click="server.showPassword = !server.showPassword" :title="server.showPassword ? '隐藏密码' : '显示密码'">
+                    <svg v-if="!server.showPassword" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+                    <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/></svg>
+                  </button>
+                </div>
+              </label>
+            </div>
+            <div class="balance-row">
+              <div class="switch-row balance-alert">
+                <span class="switch-copy stack">全账号总余额告警</span>
+                <button class="switch" type="button" role="switch" :aria-checked="server.monitorAllAccounts ? 'true' : 'false'" :title="server.monitorAllAccounts ? '关闭这台服务器的全账号总余额告警' : '开启这台服务器的全账号总余额告警，不受分组影响'" @click="server.monitorAllAccounts = !server.monitorAllAccounts">
+                  <i></i>
+                </button>
+              </div>
+              <label class="field threshold"><span>总余额阈值</span><div class="unit-input"><input type="number" v-model.number="server.estimatedCostThreshold"><span class="unit">USD</span></div></label>
+            </div>
+            <div class="group-block">
+              <p class="group-label">分组</p>
+              <div class="group-head">
+                <div class="segment" role="group" aria-label="分组范围">
+                  <button type="button" :class="{ active: server.groupScope === 'all' }" @click="server.groupScope = 'all'">全部分组</button>
+                  <button type="button" :class="{ active: server.groupScope === 'selected' }" @click="server.groupScope = 'selected'">指定分组</button>
+                </div>
+                <button class="ghost" type="button" @click="loadGroups(server)" :disabled="groupState(server).loading">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
+                  {{ groupState(server).loading ? '读取中' : '读取分组' }}
+                </button>
+              </div>
+              <div class="checks" v-if="server.groupScope === 'selected'">
+                <label class="check" v-for="group in visibleGroups(server)" :key="groupKey(group)">
+                  <input type="checkbox" :checked="isChecked(server, group)" @change="toggleGroup(server, group)">
+                  <span><b>{{ group.name }}</b> <em class="muted" v-if="group.platform">{{ group.platform }}</em></span>
+                </label>
+              </div>
+              <div class="names" v-else-if="groupState(server).groups.length">
+                <span v-for="group in groupState(server).groups" :key="groupKey(group)">{{ group.name }}</span>
+              </div>
+              <p class="group-status">{{ groupState(server).error }}</p>
+            </div>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="/vendor/vue.global.prod.js"></script>
+  <script>
+    const { createApp, reactive, ref, onMounted, onBeforeUnmount } = Vue;
+
+    function blankServer(id) {
+      return {
+        uid: crypto.randomUUID(),
+        id,
+        name: '',
+        baseUrl: '',
+        email: '',
+        password: '',
+        showPassword: false,
+        enabled: true,
+        monitorAllAccounts: true,
+        estimatedCostThreshold: 500,
+        groupScope: 'all',
+        groups: []
+      };
+    }
+
+    function sameGroup(left, right) {
+      if (left?.id != null && right?.id != null && String(left.id) === String(right.id)) return true;
+      return Boolean(left?.name) && left.name === right?.name;
+    }
+
+    createApp({
+      setup() {
+        const loading = ref(true);
+        const saving = ref(false);
+        const showWebhook = ref(false);
+        const status = ref('');
+        const tone = ref('');
+        const checking = ref(false);
+        const scheduleEnabled = ref(false);
+        const scheduleBusy = ref(false);
+        const catalogs = reactive({});
+        const form = reactive({
+          webhookUrl: '',
+          quotaRemainPercent: 20,
+          cooldownMinutes: 60,
+          checkIntervalMinutes: 60,
+          pageSize: 100,
+          timeoutMs: 30000,
+          servers: []
+        });
+        let groupTimer = 0;
+
+        function groupState(server) {
+          if (!catalogs[server.uid]) catalogs[server.uid] = { groups: [], loading: false, busy: false, error: '' };
+          return catalogs[server.uid];
+        }
+
+        function canLoadGroups(server) {
+          return Boolean(String(server.baseUrl || '').trim() && String(server.email || '').trim() && String(server.password || ''));
+        }
+
+        function applyConfig(config) {
+          form.webhookUrl = config.webhookUrl || '';
+          form.quotaRemainPercent = config.quotaRemainPercent;
+          form.cooldownMinutes = config.cooldownMinutes;
+          form.checkIntervalMinutes = config.checkIntervalMinutes;
+          form.pageSize = config.pageSize;
+          form.timeoutMs = config.timeoutMs;
+          form.servers = (config.servers || []).map((server) => ({
+            uid: crypto.randomUUID(),
+            id: server.id,
+            name: server.name || '',
+            baseUrl: server.baseUrl || '',
+            email: server.email || '',
+            password: server.password || '',
+            showPassword: false,
+            enabled: server.enabled !== false,
+            monitorAllAccounts: server.monitorAllAccounts !== false,
+            estimatedCostThreshold: server.estimatedCostThreshold ?? config.estimatedCostThreshold ?? 500,
+            groupScope: server.groupScope === 'selected' ? 'selected' : 'all',
+            groups: (server.groups || []).map((group) => ({ id: group.id ?? null, name: group.name }))
+          }));
+          if (form.servers.length === 0) form.servers.push(blankServer('server1'));
+        }
+
+        async function load() {
+          loading.value = true;
+          tone.value = '';
+          status.value = '';
+          try {
+            const response = await fetch('/api/config');
+            const body = await response.json();
+            if (!response.ok) throw new Error(body.message || '读取配置失败');
+            applyConfig(body);
+            refreshGroups();
+          } catch (error) {
+            tone.value = 'bad';
+            status.value = error.message;
+          } finally {
+            loading.value = false;
+          }
+        }
+
+        function payload() {
+          return {
+            webhookUrl: form.webhookUrl,
+            quotaRemainPercent: form.quotaRemainPercent,
+            cooldownMinutes: form.cooldownMinutes,
+            checkIntervalMinutes: form.checkIntervalMinutes,
+            pageSize: form.pageSize,
+            timeoutMs: form.timeoutMs,
+            servers: form.servers.map((server) => ({
+              id: String(server.id || '').trim(),
+              name: String(server.name || '').trim(),
+              baseUrl: server.baseUrl,
+              email: server.email,
+              password: server.password,
+              enabled: server.enabled !== false,
+              monitorAllAccounts: server.monitorAllAccounts !== false,
+              estimatedCostThreshold: server.estimatedCostThreshold,
+              groupScope: server.groupScope,
+              groups: server.groups.map((group) => ({ id: group.id ?? null, name: group.name }))
+            }))
+          };
+        }
+
+        async function save() {
+          saving.value = true;
+          tone.value = '';
+          status.value = '';
+          try {
+            const response = await fetch('/api/config', {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload())
+            });
+            const body = await response.json();
+            if (!response.ok) throw new Error(body.message || '保存失败');
+            tone.value = 'ok';
+            status.value = '已保存';
+          } catch (error) {
+            tone.value = 'bad';
+            status.value = error.message;
+          } finally {
+            saving.value = false;
+          }
+        }
+
+        async function loadSchedule() {
+          try {
+            const response = await fetch('/api/schedule');
+            const body = await response.json();
+            if (response.ok) scheduleEnabled.value = Boolean(body.enabled);
+          } catch {
+            scheduleEnabled.value = false;
+          }
+        }
+
+        async function checkOnce() {
+          checking.value = true;
+          tone.value = '';
+          status.value = '';
+          try {
+            const response = await fetch('/api/check', { method: 'POST' });
+            const body = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(body.message || '检查失败');
+            tone.value = body.failures?.length ? 'bad' : 'ok';
+            status.value = body.summary || '检查完成';
+          } catch (error) {
+            tone.value = 'bad';
+            status.value = error.message;
+          } finally {
+            checking.value = false;
+          }
+        }
+
+        async function toggleSchedule() {
+          if (scheduleBusy.value) return;
+          scheduleBusy.value = true;
+          const next = !scheduleEnabled.value;
+          try {
+            const response = await fetch('/api/schedule', {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ enabled: next })
+            });
+            const body = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(body.message || '定时告警切换失败');
+            scheduleEnabled.value = Boolean(body.enabled);
+            tone.value = 'ok';
+            status.value = body.enabled ? '定时告警已开启' : '定时告警已关闭';
+          } catch (error) {
+            tone.value = 'bad';
+            status.value = error.message;
+          } finally {
+            scheduleBusy.value = false;
+          }
+        }
+
+        function addServer() {
+          const used = new Set(form.servers.map((server) => server.id));
+          let index = form.servers.length + 1;
+          let id = `server${index}`;
+          while (used.has(id)) {
+            index += 1;
+            id = `server${index}`;
+          }
+          form.servers.push(blankServer(id));
+        }
+
+        function removeServer(server) {
+          const index = form.servers.findIndex((item) => item.uid === server.uid);
+          if (index >= 0 && form.servers.length > 1) form.servers.splice(index, 1);
+        }
+
+        function visibleGroups(server) {
+          const catalog = groupState(server).groups;
+          const extras = server.groups.filter((group) => !catalog.some((item) => sameGroup(item, group)));
+          return [...catalog, ...extras];
+        }
+
+        function isChecked(server, group) {
+          return server.groups.some((item) => sameGroup(item, group));
+        }
+
+        function toggleGroup(server, group) {
+          const index = server.groups.findIndex((item) => sameGroup(item, group));
+          if (index >= 0) server.groups.splice(index, 1);
+          else server.groups.push({ id: group.id ?? null, name: group.name });
+        }
+
+        function groupKey(group) {
+          return group.id == null ? `name:${group.name}` : `id:${group.id}`;
+        }
+
+        async function loadGroups(server, quiet = false) {
+          const state = groupState(server);
+          if (!canLoadGroups(server)) {
+            if (!quiet) state.error = '请先填写服务器地址、邮箱和密码';
+            return;
+          }
+          if (state.busy) return;
+          state.busy = true;
+          if (!quiet) {
+            state.loading = true;
+            state.error = '';
+          }
+          try {
+            const response = await fetch('/api/groups', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                baseUrl: server.baseUrl,
+                email: server.email,
+                password: server.password
+              })
+            });
+            const body = await response.json();
+            if (!response.ok) throw new Error(body.message || '读取分组失败');
+            state.groups = body.groups || [];
+            state.error = '';
+          } catch (error) {
+            state.error = error.message;
+          } finally {
+            state.busy = false;
+            state.loading = false;
+          }
+        }
+
+        function refreshGroups() {
+          for (const server of form.servers) {
+            if (server.enabled === false) continue;
+            if (canLoadGroups(server)) loadGroups(server, true);
+          }
+        }
+
+        function onKeydown(event) {
+          if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+            event.preventDefault();
+            if (!saving.value && !loading.value) save();
+          }
+        }
+
+        onMounted(() => {
+          window.addEventListener('keydown', onKeydown);
+          load();
+          loadSchedule();
+          groupTimer = window.setInterval(refreshGroups, 30000);
+        });
+        onBeforeUnmount(() => {
+          window.removeEventListener('keydown', onKeydown);
+          window.clearInterval(groupTimer);
+        });
+
+        return {
+          loading, saving, showWebhook, status, tone, checking, scheduleEnabled, scheduleBusy, form,
+          save, checkOnce, toggleSchedule, addServer, removeServer, visibleGroups, isChecked, toggleGroup,
+          groupKey, loadGroups, groupState
+        };
+      }
+    }).mount('#app');
+  </script>
+</body>
+</html>

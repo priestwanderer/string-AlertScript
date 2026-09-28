@@ -8,6 +8,7 @@
     "start": "node src/index.js",
     "once": "node src/index.js --once",
     "hourly": "node src/index.js --schedule",
+    "ui": "node src/index.js --ui",
     "test": "node --test"
   },
   "engines": {

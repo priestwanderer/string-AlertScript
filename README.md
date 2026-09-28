@@ -13,7 +13,13 @@ Node.js 18+，不依赖第三方 npm 包。
 
 可以同时监控多台服务器。`SUB2API_SERVERS` 用英文逗号分隔服务器标识，例如 `main,backup`。每台服务器使用自己的 `SUB2API_SERVER_<标识大写>_BASE_URL`、`EMAIL`、`PASSWORD` 和可选的 `NAME`。告警文本会带上对应服务器名称，同一条告警在不同服务器上分别计算静默时间。
 
+每台服务器可以单独关闭监控。页面上的「监控」开关，或环境变量 `SUB2API_SERVER_<标识大写>_ENABLED=false`，都会保留这台服务器的地址、账号和分组，但巡检时跳过它。未填写时默认开启。全部关闭时不访问服务器，也不发送企业微信消息。
+
 只监控一台时可以不填 `SUB2API_SERVERS`，改填 `SUB2API_BASE_URL`、`SUB2API_EMAIL`、`SUB2API_PASSWORD`。地址没有代码内置默认值，必须写在 `.env` 中。
+
+每台服务器用 `SUB2API_SERVER_<标识大写>_MONITOR_ALL_ACCOUNTS` 单独控制“全账号总余额告警”，默认开启。它只统计这台服务器的全部可监控账号，不受该服务器的分组范围影响，也不会把多台服务器加在一起。未单独设置时沿用 `MONITOR_ALL_ACCOUNTS`。总余额阈值用 `SUB2API_SERVER_<标识大写>_ESTIMATED_COST_THRESHOLD`，单位 USD；未单独设置时沿用 `ESTIMATED_COST_THRESHOLD`。这台服务器的全账号合计和分组总余额都跟这个阈值比较。分组范围再用 `SUB2API_SERVER_<标识大写>_GROUP_SCOPE` 选择 `all` 或 `selected`；`selected` 时把分组名称写进对应的 `GROUPS`。分组告警按每个分组分别计算。
+
+执行 `npm run ui` 后，也可以在本地页面里改 Webhook、服务器账号和分组。页面保存到 `data/monitor-config.json`，这份文件优先于 `.env`。页面只监听本机。
 
 某台服务器巡检失败时，其他服务器仍会继续检查。失败原因会作为该服务器的一条告警。单次巡检因此以非 0 状态退出；定时巡检记录失败后继续下一轮。
 
@@ -23,14 +29,15 @@ Node.js 18+，不依赖第三方 npm 包。
 node src/index.js --test
 node src/index.js --once
 npm run hourly
+npm run ui
 ```
 
-`--test` 只检查本地配置，不访问远程接口。`--once` 和 `npm start` 执行一次完整巡检。`npm run hourly` 会先立即检查一次，然后按 `CHECK_INTERVAL_MINUTES` 重复检查，默认 60 分钟。没有新的异常时不发送企业微信消息；定时进程遇到单次失败会保留下来，等下一轮继续检查。
+`--test` 只检查本地配置，不访问远程接口。`--once` 和 `npm start` 执行一次完整巡检。`npm run hourly` 会先立即检查一次，然后按 `CHECK_INTERVAL_MINUTES` 重复检查，默认 60 分钟。没有新的异常时不发送企业微信消息；定时进程遇到单次失败会保留下来，等下一轮继续检查。`npm run ui` 打开配置页面，默认地址是 `http://127.0.0.1:8787`。页面上的「告警一次」和「定时告警」由这个页面进程执行，开启后会先检查一轮，再按检查间隔重复。不要同时再运行 `npm run hourly`。
 
 ## 告警规则
 
-- 所有可监控账号的“预计总费用”之和低于 `ESTIMATED_COST_THRESHOLD`。
-- `platform` 为 OpenAI 的账号“预计总费用”之和低于同一阈值。按平台统计，不区分具体分组。
+- 某台服务器开启“全账号总余额告警”时，只把该服务器全部可监控账号的预计总费用相加，低于这台服务器的总余额阈值才告警。这项不受该服务器的分组范围影响，也不跨服务器合计。
+- 监控范围内的每个分组，其账号预计总费用之和低于同一台服务器的总余额阈值。`all` 使用巡检时账号上出现的分组；`selected` 只计算勾选的分组。不再按 OpenAI 平台汇总。
 - 单个账号 `5h` 或 `7d` 窗口剩余比例低于 `QUOTA_REMAIN_PERCENT`。
 - 缺少 `5h` 窗口时，不发送 `5h` 告警。
 - 相同告警在 `ALERT_COOLDOWN_MINUTES` 内只发送一次。

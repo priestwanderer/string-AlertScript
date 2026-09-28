@@ -7,16 +7,19 @@ import {
   getQuotaAlerts,
   getPaginationTotal,
   isMonitorableAccount,
+  readGroupCatalog,
   resolveAccountCost,
+  resolveMonitoredGroups,
   shouldFetchUsage,
+  summarizeGroupCosts,
   unwrapList,
   usageQuery,
-  parseMonitorConfig,
   buildServerAlerts,
   buildServerFailureAlert,
-  formatAlertMessage,
-  isOpenAIPlatform
+  formatAlertMessage
 } from './logic.js';
+import { loadMonitorConfig, saveMonitorConfig } from './config-store.js';
+import { serveUi } from './ui-server.js';
 
 const STATE_FILE = new URL('../data/state.json', import.meta.url);
 
@@ -35,19 +38,23 @@ function loadDotEnv() {
 
 loadDotEnv();
 
-const config = {
-  ...parseMonitorConfig(process.env)
-};
+let config = null;
 
 function parseArgs() {
   const args = new Set(process.argv.slice(2));
-  return { once: args.has('--once'), test: args.has('--test'), schedule: args.has('--schedule') };
+  return {
+    once: args.has('--once'),
+    test: args.has('--test'),
+    schedule: args.has('--schedule'),
+    ui: args.has('--ui')
+  };
 }
 
 function validateConfig() {
   const missing = [];
   if (!config.webhookUrl) missing.push('WECOM_WEBHOOK_URL');
   for (const server of config.servers) {
+    if (server.enabled === false) continue;
     if (!server.baseUrl) missing.push(server.settings.baseUrl);
     if (!server.email) missing.push(server.settings.email);
     if (!server.password) missing.push(server.settings.password);
@@ -195,13 +202,11 @@ async function inspect(server) {
     throw new Error(`以下账号用量获取失败，无法计算预计总费用：${missingCost.join('、')}`);
   }
 
-  const allEstimatedCost = records.reduce((sum, record) => sum + record.estimatedCost, 0);
-  const openaiEstimatedCost = records
-    .filter(({ account }) => isOpenAIPlatform(account))
-    .reduce((sum, record) => sum + record.estimatedCost, 0);
   const quotaAlerts = records.flatMap((record) => record.quotaAlerts);
+  const groupCosts = summarizeGroupCosts(records, resolveMonitoredGroups(server, records.map((record) => record.account)));
+  const allEstimatedCost = records.reduce((sum, record) => sum + record.estimatedCost, 0);
 
-  return { allEstimatedCost, openaiEstimatedCost, quotaAlerts, accountCount: records.length };
+  return { allEstimatedCost, groupCosts, quotaAlerts, accountCount: records.length };
 }
 
 async function readState() {
@@ -236,16 +241,30 @@ async function sendWebhook(message) {
 }
 
 async function run() {
+  config = await loadMonitorConfig();
   validateConfig();
   const state = await readState();
   const now = Date.now();
   const pending = [];
   const failures = [];
+  const active = [];
 
   for (const server of config.servers) {
+    if (server.enabled === false) {
+      console.log(`【${server.name}】监控已关闭，已跳过`);
+      continue;
+    }
+    active.push(server);
+  }
+  if (active.length === 0) {
+    return { sent: 0, failures, summary: '没有启用监控的服务器' };
+  }
+
+  for (const server of active) {
     try {
       const result = await inspect(server);
-      console.log(`【${server.name}】检查完成：${result.accountCount} 个账号，所有账号预计总费用 ${formatNumber(result.allEstimatedCost)}，OpenAI 平台 ${formatNumber(result.openaiEstimatedCost)}`);
+      const groups = result.groupCosts.map((group) => `${group.name} ${formatNumber(group.estimatedCost)}`).join('，') || '无';
+      console.log(`【${server.name}】检查完成：${result.accountCount} 个账号，所有账号总余额 ${formatNumber(result.allEstimatedCost)}，分组 ${groups}`);
       pending.push(...buildServerAlerts(server, result, config).filter((alert) => shouldSend(alert.key, state, now)));
     } catch (error) {
       failures.push(server.name);
@@ -265,37 +284,136 @@ async function run() {
     console.log(`已推送 ${pending.length} 条告警`);
   }
 
-  if (failures.length > 0) process.exitCode = 1;
+  return {
+    sent: pending.length,
+    failures,
+    summary: pending.length === 0 ? '无新告警' : `已推送 ${pending.length} 条告警`
+  };
 }
 
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+let runPromise = null;
+let scheduleEnabled = false;
+let scheduleToken = 0;
+let cancelDelay = null;
+
+function checkOnce() {
+  if (runPromise) {
+    const error = new Error('巡检进行中');
+    error.statusCode = 409;
+    throw error;
+  }
+  runPromise = run().finally(() => {
+    runPromise = null;
+  });
+  return runPromise;
 }
 
-async function schedule() {
-  validateConfig();
-  const intervalMs = config.checkIntervalMinutes * 60 * 1000;
-  console.log(`定时巡检已启动，每 ${config.checkIntervalMinutes} 分钟检查一次。无异常不发送告警。`);
-  for (;;) {
+function currentScheduleStatus() {
+  return { enabled: scheduleEnabled, running: Boolean(runPromise) };
+}
+
+function delayUntilStopped(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      cancelDelay = null;
+      resolve();
+    }, ms);
+    cancelDelay = () => {
+      clearTimeout(timer);
+      cancelDelay = null;
+      resolve();
+    };
+  });
+}
+
+async function runScheduleLoop(token) {
+  console.log('定时巡检已启动。无异常不发送告警。');
+  let announcedInterval = null;
+  while (scheduleEnabled && token === scheduleToken) {
     try {
       process.exitCode = 0;
-      await run();
+      const result = runPromise ? await runPromise : await checkOnce();
+      if (result.failures.length > 0) process.exitCode = 1;
+      if (announcedInterval !== config?.checkIntervalMinutes) {
+        announcedInterval = config?.checkIntervalMinutes;
+        if (announcedInterval) console.log(`检查间隔：${announcedInterval} 分钟`);
+      }
     } catch (error) {
       process.exitCode = 1;
       console.error(`❌ ${error.message}`);
     }
+    if (!scheduleEnabled || token !== scheduleToken) break;
+    const intervalMs = Math.max(config?.checkIntervalMinutes || 60, 1) * 60 * 1000;
     const nextAt = new Date(Date.now() + intervalMs);
     console.log(`下次检查：${nextAt.toLocaleString('zh-CN', { hour12: false })}`);
-    await delay(intervalMs);
+    await delayUntilStopped(intervalMs);
   }
+}
+
+function setSchedule(enabled) {
+  const next = Boolean(enabled);
+  if (next === scheduleEnabled) return currentScheduleStatus();
+  scheduleEnabled = next;
+  scheduleToken += 1;
+  cancelDelay?.();
+  if (next) runScheduleLoop(scheduleToken);
+  else console.log('定时巡检已停止。');
+  return currentScheduleStatus();
+}
+
+async function schedule() {
+  setSchedule(true);
+  await new Promise(() => {});
+}
+
+async function listGroups(input) {
+  config = await loadMonitorConfig();
+  const server = {
+    name: '分组查询',
+    baseUrl: String(input?.baseUrl || '').trim().replace(/\/+$/, ''),
+    email: String(input?.email || '').trim(),
+    password: input?.password == null ? '' : String(input.password)
+  };
+  if (!server.baseUrl || !server.email || !server.password) {
+    throw new Error('请先填写服务器地址、邮箱和密码');
+  }
+  const token = await login(server);
+  try {
+    return readGroupCatalog(await request(server, '/admin/groups/all?include_inactive=true', {}, token));
+  } catch {
+    return readGroupCatalog(await request(server, '/admin/groups/all', {}, token));
+  }
+}
+
+async function startUi() {
+  const port = Number(process.env.UI_PORT || 8787);
+  const host = process.env.UI_HOST || '127.0.0.1';
+  if (!Number.isInteger(port) || port <= 0) throw new Error('UI_PORT 不是有效端口');
+  const ui = await serveUi({
+    host,
+    port,
+    loadConfig: () => loadMonitorConfig(),
+    saveConfig: (input) => saveMonitorConfig(input),
+    listGroups,
+    checkOnce,
+    scheduleStatus: currentScheduleStatus,
+    setSchedule
+  });
+  console.log(`配置页面：${ui.address}`);
 }
 
 async function main() {
   const args = parseArgs();
   if (args.test) {
-    console.log('配置测试模式：仅检查 .env 配置，不请求远程接口');
+    console.log('配置测试模式：仅检查本地配置，不请求远程接口');
+    config = await loadMonitorConfig();
     validateConfig();
     console.log('配置完整');
+    return;
+  }
+
+  if (args.ui) {
+    await startUi();
     return;
   }
 
@@ -304,7 +422,8 @@ async function main() {
     return;
   }
 
-  await run();
+  const result = await run();
+  if (result.failures.length > 0) process.exitCode = 1;
 }
 
 main().catch((error) => {

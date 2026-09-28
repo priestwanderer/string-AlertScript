@@ -111,6 +111,107 @@ export function accountInGroup(account, groupName) {
   return getGroupNames(account).includes(groupName);
 }
 
+export function normalizeGroupRef(value) {
+  if (typeof value === 'string') {
+    const name = value.trim();
+    return name ? { id: null, name } : null;
+  }
+  if (!value || typeof value !== 'object') return null;
+  const name = String(value.name ?? value.group_name ?? value.groupName ?? '').trim();
+  const rawId = value.id;
+  const id = rawId === undefined || rawId === null || rawId === '' ? null : rawId;
+  if (!name && id == null) return null;
+  return { id, name: name || `分组#${id}` };
+}
+
+function parseGroupList(value) {
+  if (Array.isArray(value)) return value.map(normalizeGroupRef).filter(Boolean);
+  if (value == null || value === '') return [];
+  if (typeof value === 'string') {
+    return value.split(/[,，]/).map((item) => normalizeGroupRef(item)).filter(Boolean);
+  }
+  throw new Error('分组配置必须是列表或逗号分隔的名称');
+}
+
+function dedupeGroups(groups) {
+  const result = [];
+  for (const group of groups) {
+    const existing = result.find((item) => (
+      (group.id != null && item.id != null && String(group.id) === String(item.id))
+      || (group.name && item.name === group.name)
+    ));
+    if (!existing) {
+      result.push({ ...group });
+      continue;
+    }
+    if (existing.id == null && group.id != null) existing.id = group.id;
+  }
+  return result;
+}
+
+export function accountMatchesGroup(account, group) {
+  const target = normalizeGroupRef(group);
+  if (!target) return false;
+  if (
+    target.id != null
+    && Array.isArray(account?.group_ids)
+    && account.group_ids.some((id) => String(id) === String(target.id))
+  ) {
+    return true;
+  }
+  if (Array.isArray(account?.groups)) {
+    for (const item of account.groups) {
+      if (!item || typeof item !== 'object') continue;
+      if (target.id != null && item.id != null && String(item.id) === String(target.id)) return true;
+    }
+  }
+  return target.name ? getGroupNames(account).includes(target.name) : false;
+}
+
+export function resolveMonitoredGroups(server, accounts) {
+  if (server?.groupScope === 'selected') return dedupeGroups(parseGroupList(server.groups));
+  const found = [];
+  for (const account of accounts || []) {
+    const items = Array.isArray(account?.groups) ? account.groups : [];
+    if (items.length > 0) {
+      found.push(...items.map(normalizeGroupRef).filter(Boolean));
+      continue;
+    }
+    found.push(...getGroupNames(account).map((name) => ({ id: null, name })));
+  }
+  return dedupeGroups(found).sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'));
+}
+
+export function summarizeGroupCosts(records, groups) {
+  return (groups || []).map((group) => ({
+    id: group.id ?? null,
+    name: group.name,
+    estimatedCost: (records || [])
+      .filter((record) => accountMatchesGroup(record.account, group))
+      .reduce((sum, record) => sum + (Number.isFinite(record.estimatedCost) ? record.estimatedCost : 0), 0)
+  }));
+}
+
+export function readGroupCatalog(payload) {
+  const source = collectGroupItems(payload);
+  return dedupeGroups(source.map((item) => {
+    const group = normalizeGroupRef(item);
+    if (!group || !item || typeof item !== 'object') return group;
+    const platform = item.platform ?? item.platform_name ?? item.platformName;
+    return platform ? { ...group, platform: String(platform) } : group;
+  }).filter(Boolean));
+}
+
+function collectGroupItems(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== 'object') return [];
+  for (const key of ['groups', 'items', 'data', 'results']) {
+    if (Array.isArray(payload[key])) return payload[key];
+  }
+  if (payload.data && typeof payload.data === 'object') return collectGroupItems(payload.data);
+  return [];
+}
+
 function accountType(account) {
   return String(account?.type ?? account?.account_type ?? '').toLowerCase();
 }
@@ -151,10 +252,6 @@ export function resolveAccountCost(account, usage, { fetchFailed = false } = {})
 
 export function getPlatformName(account) {
   return String(firstDefined(account, PLATFORM_KEYS) ?? '未知平台');
-}
-
-export function isOpenAIPlatform(account) {
-  return getPlatformName(account).trim().toLowerCase() === 'openai';
 }
 
 export function isMonitorableAccount(account) {
@@ -300,6 +397,28 @@ function readNumber(env, key, fallback) {
   return number;
 }
 
+function readConfigNumber(value, key, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const number = typeof value === 'number' ? value : Number(String(value).trim());
+  if (!Number.isFinite(number)) throw new Error(`${key} 不是有效数字`);
+  return number;
+}
+
+function readBool(value, key, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  const text = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(text)) return true;
+  if (['0', 'false', 'no', 'off'].includes(text)) return false;
+  throw new Error(`${key} 不是有效布尔值`);
+}
+
+function normalizeGroupScope(value, label) {
+  const scope = String(value || 'all').trim().toLowerCase();
+  if (scope === 'all' || scope === 'selected') return scope;
+  throw new Error(`${label} 的分组范围只能是 all 或 selected`);
+}
+
 function normalizeBaseUrl(value) {
   return String(value || '').trim().replace(/\/+$/, '');
 }
@@ -321,6 +440,11 @@ function parseLegacyServer(env) {
     baseUrl,
     email: String(env.SUB2API_EMAIL || '').trim(),
     password: String(env.SUB2API_PASSWORD || ''),
+    groupScope: env.SUB2API_GROUP_SCOPE,
+    groups: env.SUB2API_GROUPS,
+    enabled: env.SUB2API_ENABLED,
+    monitorAllAccounts: env.SUB2API_MONITOR_ALL_ACCOUNTS ?? env.MONITOR_ALL_ACCOUNTS,
+    estimatedCostThreshold: env.SUB2API_ESTIMATED_COST_THRESHOLD ?? env.ESTIMATED_COST_THRESHOLD,
     settings: {
       baseUrl: 'SUB2API_BASE_URL',
       email: 'SUB2API_EMAIL',
@@ -342,11 +466,80 @@ function parseNamedServer(env, id) {
     baseUrl,
     email: String(env[`${prefix}EMAIL`] || '').trim(),
     password: String(env[`${prefix}PASSWORD`] || ''),
+    groupScope: env[`${prefix}GROUP_SCOPE`],
+    groups: env[`${prefix}GROUPS`],
+    enabled: env[`${prefix}ENABLED`],
+    monitorAllAccounts: env[`${prefix}MONITOR_ALL_ACCOUNTS`] ?? env.MONITOR_ALL_ACCOUNTS,
+    estimatedCostThreshold: env[`${prefix}ESTIMATED_COST_THRESHOLD`] ?? env.ESTIMATED_COST_THRESHOLD,
     settings: {
       baseUrl: `${prefix}BASE_URL`,
       email: `${prefix}EMAIL`,
       password: `${prefix}PASSWORD`
     }
+  };
+}
+
+function firstPresent(value, fallback) {
+  return value === undefined || value === null || value === '' ? fallback : value;
+}
+
+function normalizeServer(server, index, fallback = {}) {
+  if (!server || typeof server !== 'object' || Array.isArray(server)) {
+    throw new Error(`第 ${index + 1} 台服务器配置无效`);
+  }
+  const id = String(server.id || '').trim();
+  if (!SERVER_ID_PATTERN.test(id)) {
+    throw new Error(`服务器标识“${id || index + 1}”无效，只允许字母、数字和下划线，且必须以字母开头`);
+  }
+  const baseUrl = normalizeBaseUrl(server.baseUrl);
+  const name = String(server.name || '').trim() || serverNameFromUrl(baseUrl, id);
+  return {
+    id,
+    name,
+    baseUrl,
+    email: String(server.email || '').trim(),
+    password: server.password == null ? '' : String(server.password),
+    groupScope: normalizeGroupScope(server.groupScope, name),
+    groups: dedupeGroups(parseGroupList(server.groups)),
+    enabled: readBool(server.enabled, `${name} 的监控开关`, true),
+    monitorAllAccounts: readBool(firstPresent(server.monitorAllAccounts, fallback.monitorAllAccounts), `${name} 的全账号总余额告警`, true),
+    estimatedCostThreshold: readConfigNumber(firstPresent(server.estimatedCostThreshold, fallback.estimatedCostThreshold), `${name} 的总余额阈值`, 500),
+    settings: server.settings || {
+      baseUrl: `${name} 的地址`,
+      email: `${name} 的邮箱`,
+      password: `${name} 的密码`
+    }
+  };
+}
+
+export function normalizeMonitorConfig(input = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('配置必须是对象');
+  const servers = Array.isArray(input.servers)
+    ? input.servers.map((server, index) => normalizeServer(server, index, {
+      monitorAllAccounts: input.monitorAllAccounts,
+      estimatedCostThreshold: input.estimatedCostThreshold
+    }))
+    : [];
+  if (servers.length === 0) throw new Error('至少需要一台服务器');
+  if (new Set(servers.map((server) => server.id)).size !== servers.length) {
+    throw new Error('服务器标识不能重复');
+  }
+
+  const checkIntervalMinutes = readConfigNumber(input.checkIntervalMinutes, 'CHECK_INTERVAL_MINUTES', 60);
+  const pageSize = readConfigNumber(input.pageSize, 'PAGE_SIZE', 100);
+  const timeoutMs = readConfigNumber(input.timeoutMs, 'REQUEST_TIMEOUT_MS', 30000);
+  if (checkIntervalMinutes <= 0) throw new Error('CHECK_INTERVAL_MINUTES 必须大于 0');
+  if (pageSize <= 0) throw new Error('PAGE_SIZE 必须大于 0');
+  if (timeoutMs <= 0) throw new Error('REQUEST_TIMEOUT_MS 必须大于 0');
+
+  return {
+    webhookUrl: String(input.webhookUrl || '').trim(),
+    quotaRemainPercent: readConfigNumber(input.quotaRemainPercent, 'QUOTA_REMAIN_PERCENT', 20),
+    cooldownMinutes: readConfigNumber(input.cooldownMinutes, 'ALERT_COOLDOWN_MINUTES', 60),
+    pageSize,
+    timeoutMs,
+    checkIntervalMinutes,
+    servers
   };
 }
 
@@ -356,8 +549,8 @@ export function parseMonitorConfig(env = {}) {
     throw new Error('SUB2API_SERVERS 包含重复的服务器标识');
   }
 
-  return {
-    webhookUrl: String(env.WECOM_WEBHOOK_URL || '').trim(),
+  return normalizeMonitorConfig({
+    webhookUrl: env.WECOM_WEBHOOK_URL,
     estimatedCostThreshold: readNumber(env, 'ESTIMATED_COST_THRESHOLD', 500),
     quotaRemainPercent: readNumber(env, 'QUOTA_REMAIN_PERCENT', 20),
     cooldownMinutes: readNumber(env, 'ALERT_COOLDOWN_MINUTES', 60),
@@ -367,22 +560,25 @@ export function parseMonitorConfig(env = {}) {
     servers: ids.length > 0
       ? ids.map((id) => parseNamedServer(env, id))
       : [parseLegacyServer(env)]
-  };
+  });
 }
 
 export function buildServerAlerts(server, result, config) {
   const label = `【${server.name}】`;
+  const threshold = firstPresent(server.estimatedCostThreshold, config?.estimatedCostThreshold);
   const alerts = [];
-  if (result.allEstimatedCost < config.estimatedCostThreshold) {
+  if (server.monitorAllAccounts !== false && result.allEstimatedCost < threshold) {
     alerts.push({
       key: `${server.id}:all-estimated-cost`,
-      text: `⚠️ ${label}所有账号预计总费用：${formatNumber(result.allEstimatedCost)}（阈值 ${formatNumber(config.estimatedCostThreshold)}）`
+      text: `⚠️ ${label}所有账号总余额：${formatNumber(result.allEstimatedCost)}（阈值 ${formatNumber(threshold)}）`
     });
   }
-  if (result.openaiEstimatedCost < config.estimatedCostThreshold) {
+  for (const group of result.groupCosts || []) {
+    if (group.estimatedCost >= threshold) continue;
+    const identity = group.id == null || group.id === '' ? group.name : group.id;
     alerts.push({
-      key: `${server.id}:openai-estimated-cost`,
-      text: `⚠️ ${label}OpenAI 平台预计总费用：${formatNumber(result.openaiEstimatedCost)}（阈值 ${formatNumber(config.estimatedCostThreshold)}）`
+      key: `${server.id}:group:${identity}`,
+      text: `⚠️ ${label}分组「${group.name}」总余额：${formatNumber(group.estimatedCost)}（阈值 ${formatNumber(threshold)}）`
     });
   }
   for (const alert of result.quotaAlerts) {

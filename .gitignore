@@ -1,4 +1,5 @@
 .env
 data/state.json
+data/monitor-config.json
 node_modules/
 npm-debug.log*
