@@ -23,6 +23,7 @@ import {
   buildServerFailureAlert,
   buildMonitorView,
   getUsedCost,
+  getUsageUpdatedAt,
   formatAlertMessage,
   createInspectionGate
 } from '../src/logic.js';
@@ -45,12 +46,15 @@ test('missing 5h window does not trigger a 5h alert', () => {
 });
 
 test('nested usage payload is supported', () => {
-  const alerts = getQuotaAlerts(
-    { data: { five_hour: { utilization: 90 } } },
-    { id: 'a1', name: 'demo', group_name: 'OpenAI', platform: 'openai' },
-    20
-  );
-  assert.deepEqual(alerts.map((item) => item.windowName), ['5h']);
+  for (const key of ['data', 'usage']) {
+    const alerts = getQuotaAlerts(
+      { [key]: { five_hour: { utilization: 90 } } },
+      { id: 'a1', name: 'demo', group_name: 'OpenAI', platform: 'openai' },
+      20
+    );
+    assert.deepEqual(alerts.map((item) => item.windowName), ['5h']);
+    assert.equal(alerts[0].remainingPercent, 10);
+  }
 });
 
 test('direct 5h UsageProgress payload is supported', () => {
@@ -74,6 +78,95 @@ test('5h and 7d alerts are reported separately', () => {
   assert.deepEqual(alerts.map((item) => item.windowName), ['5h', '7d']);
 });
 
+test('quota percentages keep their units across the one-percent boundary', () => {
+  for (const value of [0, 0.1, 0.5, 0.8, 0.9, 1, 1.01, 2, 80, 80.1, 85, 100]) {
+    for (const utilization of [value, String(value)]) {
+      for (const [usage, windowName] of [
+        [{ five_hour: { utilization } }, '5h'],
+        [{ seven_day: { utilization } }, '7d'],
+        [{ windows: { weekly: { used_percent: utilization } } }, '7d'],
+        [{ seven_day_utilization: utilization }, '7d'],
+        [{ data: { utilization } }, '5h'],
+        [{ data: { usage: { seven_day: { utilization } } } }, '7d'],
+        [{ utilization }, '5h']
+      ]) {
+        const alerts = getQuotaAlerts(usage, {}, 20);
+        assert.deepEqual(alerts.map(({ windowName, remainingPercent }) => ({ windowName, remainingPercent })),
+          value > 80 ? [{ windowName, remainingPercent: 100 - value }] : [], JSON.stringify(usage));
+      }
+    }
+  }
+});
+
+test('explicit remaining percentages below one percent still trigger alerts', () => {
+  for (const value of [0, 0.1, 0.5, 0.9, 1, 19.9, 20]) {
+    for (const remaining of [value, String(value)]) {
+      for (const usage of [
+        { seven_day: { remaining_percent: remaining } },
+        { seven_day: { remainingPercent: remaining } },
+        { seven_day_remaining_percent: remaining }
+      ]) {
+        const alerts = getQuotaAlerts(usage, {}, 20);
+        assert.deepEqual(alerts.map((alert) => alert.remainingPercent), value < 20 ? [value] : []);
+      }
+    }
+  }
+});
+
+test('reset countdowns and missing percentages are not quota measurements', () => {
+  for (const usage of [
+    null, undefined, {}, { remaining_seconds: 0 }, { remaining_seconds: 600, window_seconds: 18000 },
+    { five_hour: { remaining_seconds: 0 } }, { seven_day: {} },
+    { seven_day: { utilization: null } }, { seven_day: { utilization: '' } },
+    { seven_day: { utilization: 'unknown' } }, { seven_day: { utilization: NaN } }
+  ]) {
+    assert.deepEqual(getQuotaAlerts(usage, {}, 20), [], JSON.stringify(usage));
+  }
+});
+
+test('one-percent screenshot scenario stays healthy through view and notification logic', () => {
+  const account = { id: 269, name: 'demo', platform: 'openai', type: 'oauth', groups: [{ name: 'primary' }] };
+  const usage = { seven_day: { utilization: 1, window_stats: { cost: 5.4068 } } };
+  const record = { account, estimatedCost: getEstimatedTotalCost(usage), usedCost: getUsedCost(usage), quotaAlerts: getQuotaAlerts(usage, account, 20) };
+  const server = { id: 'test', name: 'test', estimatedCostThreshold: 500, monitorAllAccounts: true, groupScope: 'all' };
+  const result = { allEstimatedCost: record.estimatedCost, accountCount: 1, records: [record], groupCosts: [{ name: 'primary', estimatedCost: record.estimatedCost }], quotaAlerts: record.quotaAlerts };
+  assert.equal(record.estimatedCost, 540.68);
+  assert.equal(record.usedCost, 5.4068);
+  assert.equal(getQuotaAlerts(usage, account, 100)[0].remainingPercent, 99);
+  assert.equal(buildMonitorView(server, result).urgentAccountCount, 0);
+  assert.deepEqual(buildMonitorView(server, result).groups, []);
+  assert.deepEqual(buildServerAlerts(server, result, {}), []);
+});
+
+test('usage timestamps come from the API and never fall back to collection time', () => {
+  const timestamp = '2026-09-29T10:49:01+08:00';
+  const iso = '2026-09-29T02:49:01.000Z';
+  for (const usage of [{ updated_at: timestamp }, { data: { updated_at: timestamp } }, { usage: { updatedAt: timestamp } }, { data: { usage: { updated_at: timestamp } } }]) {
+    assert.equal(getUsageUpdatedAt(usage), iso);
+  }
+  for (const usage of [null, {}, { updated_at: '' }, { updated_at: 'invalid' }, { updated_at: 0 }]) {
+    assert.equal(getUsageUpdatedAt(usage), null);
+  }
+});
+
+test('monitor freshness reports the oldest usage time and accounts with unknown timestamps', () => {
+  const server = { id: 'test', name: 'test', estimatedCostThreshold: 500, groupScope: 'all' };
+  const makeRecord = (id, usageUpdatedAt) => ({
+    account: { id, name: `account-${id}`, groups: [{ name: 'primary' }] },
+    estimatedCost: 100, usedCost: 90, usageUpdatedAt,
+    quotaAlerts: [{ windowName: '7d', remainingPercent: 10 }]
+  });
+  const records = [makeRecord(1, '2026-09-29T10:49:01+08:00'), makeRecord(2, '2026-09-29T02:00:00Z'), makeRecord(3, null), makeRecord(4, 'invalid')];
+  const result = { allEstimatedCost: 400, accountCount: 4, records, groupCosts: [{ name: 'primary', estimatedCost: 400 }] };
+  const view = buildMonitorView(server, result);
+  assert.equal(view.usageUpdatedAt, '2026-09-29T02:00:00.000Z');
+  assert.equal(view.usageTimestampMissingCount, 2);
+  assert.equal(view.groups[0].accounts[0].usageUpdatedAt, '2026-09-29T02:49:01.000Z');
+  assert.equal(view.groups[0].accounts[2].usageUpdatedAt, null);
+  assert.equal(buildMonitorView(server, { ...result, records: [] }).usageUpdatedAt, null);
+  assert.equal(buildMonitorView(server, { ...result, records: [makeRecord(1, null)] }).usageTimestampMissingCount, 1);
+});
+
 test('disabled and unschedulable accounts are skipped', () => {
   assert.equal(isMonitorableAccount({ status: 'disabled' }), false);
   assert.equal(isMonitorableAccount({ schedulable: false }), false);
@@ -95,10 +188,70 @@ test('projects estimated total cost from the 7d window and keeps explicit fields
   }), 5);
 });
 
-test('a successful usage response without an estimate contributes zero', () => {
+test('a successful usage response without an estimate stays unknown', () => {
   const account = { platform: 'openai', type: 'oauth', groups: [{ name: 'OpenAI' }] };
   const usage = { seven_day: { utilization: 0, window_stats: { cost: 0 } } };
-  assert.deepEqual(resolveAccountCost(account, usage), { include: true, cost: 0, missing: false });
+  assert.deepEqual(resolveAccountCost(account, usage), { include: true, cost: null, missing: false });
+});
+
+test('missing monetary data does not create a balance alert but keeps quota alerts', () => {
+  const account = { id: 218, name: 'grok-user', platform: 'grok', type: 'oauth', groups: [{ name: 'grok' }] };
+  const usage = {
+    updated_at: '2026-09-29T03:10:09Z',
+    seven_day: { utilization: 17, window_stats: { cost: 0 } }
+  };
+  const record = {
+    account,
+    estimatedCost: getEstimatedTotalCost(usage),
+    usedCost: getUsedCost(usage),
+    quotaAlerts: getQuotaAlerts(usage, account, 20)
+  };
+  const groupCosts = summarizeGroupCosts([record], [{ name: 'grok' }]);
+  const server = { id: 'us', name: '美国站', estimatedCostThreshold: 500, monitorAllAccounts: true, groupScope: 'all' };
+  const result = {
+    allEstimatedCost: null,
+    accountCount: 1,
+    records: [record],
+    groupCosts,
+    quotaAlerts: record.quotaAlerts
+  };
+  const view = buildMonitorView(server, result);
+  assert.equal(record.estimatedCost, null);
+  assert.equal(record.usedCost, 0);
+  assert.deepEqual(record.quotaAlerts, []);
+  assert.equal(groupCosts[0].estimatedCost, null);
+  assert.equal(view.all, null);
+  assert.deepEqual(view.groups, []);
+  assert.equal(view.lowGroupCount, 0);
+  assert.equal(view.unknownCostGroupCount, 1);
+  assert.deepEqual(buildServerAlerts(server, result, {}), []);
+});
+
+test('unknown groups do not hide a real single-account quota alert', () => {
+  const account = { id: 218, name: 'grok-user', platform: 'grok', type: 'oauth', groups: [{ name: 'grok' }] };
+  const record = {
+    account,
+    estimatedCost: null,
+    usedCost: 0,
+    quotaAlerts: [{ accountId: 218, accountName: account.name, groupName: 'grok', platformName: 'grok', windowName: '7d', remainingPercent: 17 }]
+  };
+  const result = {
+    allEstimatedCost: null,
+    accountCount: 1,
+    records: [record],
+    groupCosts: [{ name: 'grok', estimatedCost: null }],
+    quotaAlerts: record.quotaAlerts
+  };
+  const server = { id: 'us', name: '美国站', estimatedCostThreshold: 500, monitorAllAccounts: true, groupScope: 'all' };
+  const view = buildMonitorView(server, result);
+  const alerts = buildServerAlerts(server, result, {});
+  assert.equal(view.urgentAccountCount, 1);
+  assert.equal(view.groups[0].urgentCount, 1);
+  assert.equal(view.groups[0].usedCost, null);
+  assert.equal(view.groups[0].accounts[0].estimatedCost, null);
+  assert.equal(view.groups[0].accounts[0].usedCost, null);
+  assert.deepEqual(view.groups[0].accounts[0].windows, [{ windowName: '7d', remainingPercent: 17 }]);
+  assert.deepEqual(alerts.map((alert) => alert.key), ['us:quota:218:7d']);
 });
 
 test('a failed usage fetch is missing unless the account already has an explicit cost', () => {
@@ -193,7 +346,7 @@ test('all-account balance is independent from selected groups', () => {
     { estimatedCostThreshold: 500 }
   );
   assert.deepEqual(alerts.map((alert) => alert.key), ['japan:group:3']);
-  assert.match(alerts[0].text, /【日本站】分组「rotation」总余额：80/);
+  assert.match(alerts[0].text, /【日本站】分组「rotation」预计总费用：80/);
 
   const usa = buildServerAlerts(
     { id: 'usa', name: '美国站', monitorAllAccounts: true },
@@ -429,7 +582,7 @@ test('alerts are labeled and keyed by server', () => {
     }]
   }, { estimatedCostThreshold: 500 });
   assert.deepEqual(alerts.map((alert) => alert.key), ['main:all-estimated-cost', 'main:quota:7:5h']);
-  assert.match(formatAlertMessage(alerts), /【主服务器】所有账号总余额/);
+  assert.match(formatAlertMessage(alerts), /【主服务器】所有账号预计总费用/);
   assert.match(formatAlertMessage(alerts), /【主服务器】单账号额度不足：demo/);
   assert.match(buildServerFailureAlert({ id: 'backup', name: '备用服务器' }, '登录失败').text, /【备用服务器】巡检失败：登录失败/);
 });

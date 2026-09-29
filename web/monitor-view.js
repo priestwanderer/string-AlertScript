@@ -52,7 +52,9 @@ export function balancePercent(cost, threshold) {
 }
 
 export function percentText(value) {
-  return Number.isFinite(value) ? `${Math.round(value)}%` : '--';
+  if (!Number.isFinite(value)) return '--';
+  if (value > 0 && value < 0.1) return '<0.1%';
+  return `${Math.round(value * 10) / 10}%`;
 }
 
 export function windowPercent(account, name) {

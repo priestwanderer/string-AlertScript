@@ -48,7 +48,7 @@ function usageRoot(payload) {
   if (payload.seven_day || payload.five_hour) return payload;
   for (const key of ['data', 'usage']) {
     const nested = payload[key];
-    if (nested && typeof nested === 'object' && (nested.seven_day || nested.five_hour)) return nested;
+    if (nested && typeof nested === 'object' && !Array.isArray(nested)) return usageRoot(nested);
   }
   return payload;
 }
@@ -81,6 +81,13 @@ export function getEstimatedTotalCost(account) {
 export function getUsedCost(payload) {
   const cost = usageRoot(payload)?.seven_day?.window_stats?.cost;
   return typeof cost === 'number' && Number.isFinite(cost) && cost >= 0 ? cost : null;
+}
+
+export function getUsageUpdatedAt(payload) {
+  const value = firstDefined(usageRoot(payload), ['updated_at', 'updatedAt']);
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
 }
 
 export function getAccountName(account) {
@@ -191,9 +198,11 @@ export function summarizeGroupCosts(records, groups) {
   return (groups || []).map((group) => ({
     id: group.id ?? null,
     name: group.name,
-    estimatedCost: (records || [])
-      .filter((record) => accountMatchesGroup(record.account, group))
-      .reduce((sum, record) => sum + (Number.isFinite(record.estimatedCost) ? record.estimatedCost : 0), 0)
+    estimatedCost: (() => {
+      const members = (records || []).filter((record) => accountMatchesGroup(record.account, group));
+      if (members.length === 0 || members.some((record) => !Number.isFinite(record.estimatedCost))) return null;
+      return members.reduce((sum, record) => sum + record.estimatedCost, 0);
+    })()
   }));
 }
 
@@ -289,7 +298,9 @@ export function resolveAccountCost(account, usage, { fetchFailed = false } = {})
   if (fetchFailed && fromAccount === null) {
     return { include: false, cost: null, missing: true };
   }
-  return { include: true, cost: cost ?? 0, missing: false };
+  // A successful usage response can legitimately omit billing/estimate data.
+  // Keep it unknown so monetary alerts do not turn missing data into a false zero.
+  return { include: true, cost, missing: false };
 }
 
 export function getPlatformName(account) {
@@ -304,9 +315,8 @@ export function isMonitorableAccount(account) {
 }
 
 function normalizePercent(value) {
-  const number = toFiniteNumber(value);
-  if (number === null) return null;
-  return number <= 1 ? number * 100 : number;
+  // Sub2API utilization and *_percent fields use percentage points: 1 means 1%.
+  return toFiniteNumber(value);
 }
 
 function readWindow(usage, keys) {
@@ -367,23 +377,14 @@ function getWindowRemaining(usage, windowName) {
         resetsAt: usage?.resets_at ?? usage?.resetsAt
       };
     }
-
-    const seconds = toFiniteNumber(usage.remaining_seconds);
-    const duration = toFiniteNumber(usage.window_seconds ?? usage.limit_seconds) ?? 5 * 60 * 60;
-    if (seconds !== null && duration !== null && duration > 0) {
-      return {
-        exists: true,
-        remainingPercent: Math.max(0, Math.min(100, (seconds / duration) * 100)),
-        resetsAt: usage.resets_at
-      };
-    }
   }
 
+  // remaining_seconds is a reset countdown, not an amount of available quota.
   return { exists: false, remainingPercent: 100, resetsAt: undefined };
 }
 
 export function getQuotaAlerts(usage, account, thresholdPercent) {
-  const source = usage?.data && typeof usage.data === 'object' ? usage.data : usage;
+  const source = usageRoot(usage) ?? {};
   const alerts = [];
   for (const windowName of ['5h', '7d']) {
     const result = getWindowRemaining(source, windowName);
@@ -403,6 +404,7 @@ export function getQuotaAlerts(usage, account, thresholdPercent) {
 }
 
 function sumUsedCost(records) {
+  if ((records || []).some((record) => !Number.isFinite(record.estimatedCost))) return null;
   const values = (records || []).map((record) => record.usedCost).filter((value) => Number.isFinite(value));
   return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : null;
 }
@@ -414,7 +416,8 @@ function presentUrgentAccount(record) {
     groupName: getGroupName(record.account),
     platform: getPlatformName(record.account),
     estimatedCost: record.estimatedCost,
-    usedCost: Number.isFinite(record.usedCost) ? record.usedCost : null,
+    usedCost: Number.isFinite(record.estimatedCost) && Number.isFinite(record.usedCost) ? record.usedCost : null,
+    usageUpdatedAt: getUsageUpdatedAt({ updated_at: record.usageUpdatedAt }),
     windows: (record.quotaAlerts || []).map((alert) => ({
       windowName: alert.windowName,
       remainingPercent: alert.remainingPercent
@@ -425,6 +428,9 @@ function presentUrgentAccount(record) {
 export function buildMonitorView(server, result) {
   const threshold = server.estimatedCostThreshold;
   const records = result.records || [];
+  const usageTimestamps = records.map((record) => getUsageUpdatedAt({ updated_at: record.usageUpdatedAt })).filter(Boolean);
+  const usageUpdatedAt = usageTimestamps.reduce((oldest, timestamp) =>
+    oldest === null || Date.parse(timestamp) < Date.parse(oldest) ? timestamp : oldest, null);
   const monitored = resolveMonitoredGroups(server, records.map((record) => record.account));
   const inScope = records.filter((record) => monitored.some((group) => accountMatchesGroup(record.account, group)));
   const groups = (result.groupCosts || []).map((group) => {
@@ -435,7 +441,7 @@ export function buildMonitorView(server, result) {
       name: group.name,
       estimatedCost: group.estimatedCost,
       usedCost: sumUsedCost(members),
-      low: group.estimatedCost < threshold,
+      low: Number.isFinite(group.estimatedCost) && group.estimatedCost < threshold,
       urgentCount: urgent.length,
       accounts: urgent.map(presentUrgentAccount)
     };
@@ -447,11 +453,16 @@ export function buildMonitorView(server, result) {
     urgentIds.add(record.account?.id ?? getAccountName(record.account));
   }
 
-  const allLow = server.monitorAllAccounts !== false && result.allEstimatedCost < threshold;
+  const allLow = server.monitorAllAccounts !== false
+    && Number.isFinite(result.allEstimatedCost)
+    && result.allEstimatedCost < threshold;
   return {
     id: server.id,
     name: server.name,
     threshold,
+    usageUpdatedAt,
+    usageTimestampMissingCount: records.length - usageTimestamps.length,
+    unknownCostGroupCount: (result.groupCosts || []).filter((group) => !Number.isFinite(group.estimatedCost)).length,
     lowGroupCount: groups.filter((group) => group.low).length,
     urgentAccountCount: urgentIds.size,
     all: allLow ? {
@@ -606,8 +617,8 @@ function normalizeServer(server, index, fallback = {}) {
     groupScope: normalizeGroupScope(server.groupScope, name),
     groups: dedupeGroups(parseGroupList(server.groups)),
     enabled: readBool(server.enabled, `${name} 的监控开关`, true),
-    monitorAllAccounts: readBool(firstPresent(server.monitorAllAccounts, fallback.monitorAllAccounts), `${name} 的全账号总余额告警`, true),
-    estimatedCostThreshold: readConfigNumber(firstPresent(server.estimatedCostThreshold, fallback.estimatedCostThreshold), `${name} 的总余额阈值`, 500),
+    monitorAllAccounts: readBool(firstPresent(server.monitorAllAccounts, fallback.monitorAllAccounts), `${name} 的全账号预计总费用告警`, true),
+    estimatedCostThreshold: readConfigNumber(firstPresent(server.estimatedCostThreshold, fallback.estimatedCostThreshold), `${name} 的预计总费用阈值`, 500),
     settings: server.settings || {
       baseUrl: `${name} 的地址`,
       email: `${name} 的邮箱`,
@@ -671,18 +682,22 @@ export function buildServerAlerts(server, result, config) {
   const label = `【${server.name}】`;
   const threshold = firstPresent(server.estimatedCostThreshold, config?.estimatedCostThreshold);
   const alerts = [];
-  if (server.monitorAllAccounts !== false && result.allEstimatedCost < threshold) {
+  if (
+    server.monitorAllAccounts !== false
+    && Number.isFinite(result.allEstimatedCost)
+    && result.allEstimatedCost < threshold
+  ) {
     alerts.push({
       key: `${server.id}:all-estimated-cost`,
-      text: `⚠️ ${label}所有账号总余额：${formatNumber(result.allEstimatedCost)}（阈值 ${formatNumber(threshold)}）`
+      text: `⚠️ ${label}所有账号预计总费用：${formatNumber(result.allEstimatedCost)}（阈值 ${formatNumber(threshold)}）`
     });
   }
   for (const group of result.groupCosts || []) {
-    if (group.estimatedCost >= threshold) continue;
+    if (!Number.isFinite(group.estimatedCost) || group.estimatedCost >= threshold) continue;
     const identity = group.id == null || group.id === '' ? group.name : group.id;
     alerts.push({
       key: `${server.id}:group:${identity}`,
-      text: `⚠️ ${label}分组「${group.name}」总余额：${formatNumber(group.estimatedCost)}（阈值 ${formatNumber(threshold)}）`
+      text: `⚠️ ${label}分组「${group.name}」预计总费用：${formatNumber(group.estimatedCost)}（阈值 ${formatNumber(threshold)}）`
     });
   }
   for (const alert of result.quotaAlerts) {

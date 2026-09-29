@@ -13,6 +13,7 @@ import {
   attachGroupCatalog,
   resolveAccountCost,
   getUsedCost,
+  getUsageUpdatedAt,
   resolveMonitoredGroups,
   shouldFetchUsage,
   summarizeGroupCosts,
@@ -245,8 +246,9 @@ async function inspect(server) {
 
     records.push({
       account,
-      estimatedCost: resolved.cost ?? 0,
+      estimatedCost: resolved.cost,
       usedCost: usageItem ? getUsedCost(usageItem) : null,
+      usageUpdatedAt: getUsageUpdatedAt(usageItem),
       quotaAlerts: usageItem ? getQuotaAlerts(usageItem, account, config.quotaRemainPercent) : []
     });
   }
@@ -257,7 +259,9 @@ async function inspect(server) {
 
   const quotaAlerts = records.flatMap((record) => record.quotaAlerts);
   const groupCosts = summarizeGroupCosts(records, resolveMonitoredGroups(server, records.map((record) => record.account)));
-  const allEstimatedCost = records.reduce((sum, record) => sum + record.estimatedCost, 0);
+  const allEstimatedCost = records.length > 0 && records.every((record) => Number.isFinite(record.estimatedCost))
+    ? records.reduce((sum, record) => sum + record.estimatedCost, 0)
+    : null;
 
   return { allEstimatedCost, groupCosts, quotaAlerts, accountCount: records.length, records };
 }
@@ -317,7 +321,7 @@ async function run() {
     try {
       const result = await inspect(server);
       const groups = result.groupCosts.map((group) => `${group.name} ${formatNumber(group.estimatedCost)}`).join('，') || '无';
-      console.log(`【${server.name}】检查完成：${result.accountCount} 个账号，所有账号总余额 ${formatNumber(result.allEstimatedCost)}，分组 ${groups}`);
+      console.log(`【${server.name}】检查完成：${result.accountCount} 个账号，所有账号预计总费用 ${formatNumber(result.allEstimatedCost)}，分组 ${groups}`);
       pending.push(...buildServerAlerts(server, result, config).filter((alert) => shouldSend(alert.key, state, now)));
     } catch (error) {
       failures.push(server.name);
@@ -367,7 +371,8 @@ function monitorSnapshot(serverId = '') {
       if (server.enabled === false) throw new Error(`【${server.name}】监控已关闭`);
       const missing = missingCredentials([server]);
       if (missing.length > 0) throw new Error(`请先在 .env 中填写：${missing.join('、')}`);
-      return { generatedAt: new Date().toISOString(), server: await inspectServerView(server) };
+      const view = await inspectServerView(server);
+      return { generatedAt: new Date().toISOString(), server: view };
     }
     const active = config.servers.filter((server) => server.enabled !== false);
     const missing = missingCredentials(active);
@@ -491,6 +496,7 @@ async function startUi() {
   const ui = await serveUi({
     host,
     port,
+    basePath: process.env.UI_BASE_PATH || '',
     loadConfig: () => loadMonitorConfig(),
     saveConfig: (input) => saveMonitorConfig(input),
     listGroups,

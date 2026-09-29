@@ -415,7 +415,7 @@
       .mark { font-size: 24px; }
     }
   </style>
-  <link rel="stylesheet" href="/monitor.css">
+  <link rel="stylesheet" href="./monitor.css">
 </head>
 <body>
   <div id="app" v-cloak>
@@ -522,12 +522,12 @@
             </div>
             <div class="balance-row">
               <div class="switch-row balance-alert">
-                <span class="switch-copy stack">全账号总余额告警</span>
-                <button class="switch" type="button" role="switch" :aria-checked="server.monitorAllAccounts ? 'true' : 'false'" :title="server.monitorAllAccounts ? '关闭这台服务器的全账号总余额告警' : '开启这台服务器的全账号总余额告警，不受分组影响'" @click="server.monitorAllAccounts = !server.monitorAllAccounts">
+                <span class="switch-copy stack">全账号预计总费用告警</span>
+                <button class="switch" type="button" role="switch" :aria-checked="server.monitorAllAccounts ? 'true' : 'false'" :title="server.monitorAllAccounts ? '关闭这台服务器的全账号预计总费用告警' : '开启这台服务器的全账号预计总费用告警，不受分组影响'" @click="server.monitorAllAccounts = !server.monitorAllAccounts">
                   <i></i>
                 </button>
               </div>
-              <label class="field threshold"><span>总余额阈值</span><div class="unit-input"><input type="number" v-model.number="server.estimatedCostThreshold"><span class="unit">USD</span></div></label>
+              <label class="field threshold"><span>预计总费用阈值</span><div class="unit-input"><input type="number" v-model.number="server.estimatedCostThreshold"><span class="unit">USD</span></div></label>
             </div>
             <div class="group-block">
               <p class="group-label">分组</p>
@@ -558,15 +558,15 @@
       </template>
       <div v-else class="monitor-page">
         <div class="monitor-heading">
-          <div><p class="eyebrow">WORKSPACE / MONITORING</p><h1>监控概览<span class="heading-tag">{{ previewMode ? '预览数据' : '实时' }}</span></h1><p class="page-description">服务器余额与账号额度</p></div>
+          <div><p class="eyebrow">WORKSPACE / MONITORING</p><h1>监控概览<span class="heading-tag">{{ previewMode ? '预览数据' : '监控数据' }}</span></h1><p class="page-description">预计总费用与账号窗口额度</p></div>
           <div class="schedule-note"><ui-icon name="bell"></ui-icon>定时告警<span :class="{ 'text-success': scheduleEnabled }">{{ scheduleEnabled ? '已开启' : '未开启' }}</span></div>
         </div>
         <div v-if="tone === 'bad' && status" class="read-error" role="alert"><ui-icon name="circle-alert"></ui-icon><span>{{ status }}</span><button class="text-button" type="button" @click="load">重试</button></div>
 
         <section class="overview-strip" aria-label="监控汇总">
           <div class="overview-stat"><div class="stat-label">监控服务器<ui-icon name="server"></ui-icon></div><div class="stat-value">{{ loading ? '--' : monitorSummary.total }}<small>台</small></div><div class="stat-foot"><i class="status-dot" :class="{ neutral: !monitorSummary.readable }"></i>{{ monitorSummary.readable }} 台已读取<span v-if="monitorSummary.pending"> · {{ monitorSummary.pending }} 台读取中</span></div></div>
-          <div class="overview-stat"><div class="stat-label">需关注服务器<ui-icon name="circle-alert"></ui-icon></div><div class="stat-value" :class="{ 'text-warning': monitorSummary.attention > 0 }">{{ loading ? '--' : monitorSummary.attention }}<small>台</small></div><div class="stat-foot">{{ monitorSummary.errors ? `${monitorSummary.errors} 台读取异常` : '余额 / 额度异常' }}</div></div>
-          <div class="overview-stat"><div class="stat-label">余额不足分组<ui-icon name="layers"></ui-icon></div><div class="stat-value" :class="{ 'text-warning': monitorSummary.lowGroups > 0 }">{{ loading ? '--' : monitorSummary.lowGroups ?? '--' }}<small>组</small></div><div class="stat-foot">低于服务器设定阈值</div></div>
+          <div class="overview-stat"><div class="stat-label">需关注服务器<ui-icon name="circle-alert"></ui-icon></div><div class="stat-value" :class="{ 'text-warning': monitorSummary.attention > 0 }">{{ loading ? '--' : monitorSummary.attention }}<small>台</small></div><div class="stat-foot">{{ monitorSummary.errors ? `${monitorSummary.errors} 台读取异常` : '费用估算 / 额度异常' }}</div></div>
+          <div class="overview-stat"><div class="stat-label">费用低于阈值分组<ui-icon name="layers"></ui-icon></div><div class="stat-value" :class="{ 'text-warning': monitorSummary.lowGroups > 0 }">{{ loading ? '--' : monitorSummary.lowGroups ?? '--' }}<small>组</small></div><div class="stat-foot">预计总费用低于设定阈值</div></div>
           <div class="overview-stat"><div class="stat-label">告急账号<ui-icon name="users"></ui-icon></div><div class="stat-value" :class="{ 'text-danger': monitorSummary.urgentAccounts > 0 }">{{ loading ? '--' : monitorSummary.urgentAccounts ?? '--' }}<small>个</small></div><div class="stat-foot">窗口剩余额度不足 {{ form.quotaRemainPercent ?? '--' }}%</div></div>
         </section>
 
@@ -581,49 +581,49 @@
             <article class="monitor-server" v-for="card in visibleMonitorCards" :key="card.uid" :data-status="cardStatus(card).tone">
               <header class="monitor-server-head">
                 <div class="server-identity"><span class="server-avatar"><ui-icon name="server"></ui-icon></span><div><div class="server-title-line"><h3>{{ card.name || card.id }}</h3><span class="state-label" :class="cardStatus(card).tone"><i class="status-dot"></i>{{ cardStatus(card).label }}</span></div><div class="server-subline"><span class="mono">{{ card.id }}</span><span>告警阈值 <b>{{ moneyNumber(card.view?.threshold ?? card.threshold) }} <small>USD</small></b></span></div></div></div>
-                <div class="server-header-actions"><span class="updated-at" :title="formatStamp(card.generatedAt)">{{ card.loading ? '正在读取用量' : card.generatedAt ? `更新于 ${formatTime(card.generatedAt)}` : '等待数据' }}</span><button class="icon compact" type="button" :title="`刷新 ${card.name || card.id}`" :aria-label="`刷新 ${card.name || card.id}`" :disabled="card.loading" @click="loadServer(card.id)"><ui-icon name="refresh-cw" :class="{ spinning: card.loading }"></ui-icon></button></div>
+                <div class="server-header-actions"><span class="updated-at" :title="formatStamp(card.generatedAt)">{{ card.loading ? '正在读取用量' : card.generatedAt ? `采集于 ${formatTime(card.generatedAt)}` : '等待数据' }}</span><button class="icon compact" type="button" :title="`刷新 ${card.name || card.id}`" :aria-label="`刷新 ${card.name || card.id}`" :disabled="card.loading" @click="loadServer(card.id)"><ui-icon name="refresh-cw" :class="{ spinning: card.loading }"></ui-icon></button></div>
               </header>
               <div v-if="card.skeleton" class="server-loading" role="status" aria-label="正在读取服务器用量"><span class="sk sk-title"></span><span class="sk sk-bar"></span><span class="sk sk-bar"></span></div>
               <template v-else>
                 <div v-if="card.error || card.view?.error" class="read-error" role="status"><ui-icon name="circle-alert"></ui-icon><div><strong>{{ card.view && !card.view.error ? '刷新失败，保留上次数据' : '暂时无法读取服务器' }}</strong><p>{{ card.error || card.view.error }}</p></div><button type="button" class="text-button" :disabled="card.loading" @click="loadServer(card.id)">重试</button></div>
                 <template v-if="card.view && !card.view.error">
-                  <div v-if="card.view.all" class="balance-warning"><div class="balance-warning-label"><ui-icon name="circle-alert"></ui-icon><span>全账号总余额不足</span></div><div><small>总余额</small><strong>{{ moneyNumber(card.view.all.estimatedCost) }} <em>USD</em></strong></div><div><small>已使用</small><strong>{{ moneyNumber(card.view.all.usedCost) }} <em>USD</em></strong></div><div class="threshold-track"><div><small>相对告警阈值</small><b>{{ percentText(balancePercent(card.view.all.estimatedCost, card.view.threshold)) }}</b></div><div class="quota-track"><i :style="{ width: meterWidth(balancePercent(card.view.all.estimatedCost, card.view.threshold)) }"></i></div></div></div>
+                  <div v-if="card.view.all" class="balance-warning"><div class="balance-warning-label"><ui-icon name="circle-alert"></ui-icon><span>全账号预计总费用低于阈值</span></div><div><small>预计总费用</small><strong>{{ moneyNumber(card.view.all.estimatedCost) }} <em>USD</em></strong></div><div><small>7d 已使用</small><strong>{{ moneyNumber(card.view.all.usedCost) }} <em>USD</em></strong></div><div class="threshold-track"><div><small>相对告警阈值</small><b>{{ percentText(balancePercent(card.view.all.estimatedCost, card.view.threshold)) }}</b></div><div class="quota-track"><i :style="{ width: meterWidth(balancePercent(card.view.all.estimatedCost, card.view.threshold)) }"></i></div></div></div>
                   <div class="group-table" v-if="card.view.groups.length">
-                    <div class="group-columns" aria-hidden="true"><span>异常分组</span><span>总余额 <small>USD</small></span><span>已使用 <small>USD</small></span><span>告急账号</span><span></span></div>
+                    <div class="group-columns" aria-hidden="true"><span>异常分组</span><span>预计总费用 <small>USD</small></span><span>7d 已使用 <small>USD</small></span><span>告急账号</span><span></span></div>
                     <div class="monitor-group" v-for="group in card.view.groups" :key="groupKey(group)">
                       <button class="group-summary" type="button" :aria-label="`${group.name}，${group.urgentCount} 个告急账号`" :aria-expanded="group.accounts.length ? groupExpanded(card.id, group) : undefined" :aria-controls="group.accounts.length ? detailsId(card.id, group) : undefined" :disabled="!group.accounts.length" @click="toggleDetails(card.id, group)">
-                        <span class="group-identity"><ui-icon name="layers"></ui-icon><span><strong>{{ group.name }}</strong><small :class="group.low ? 'text-warning' : 'subtle'">{{ group.low ? '余额低于阈值' : '账号额度告急' }}</small></span></span>
-                        <span class="numeric group-balance" :class="{ 'text-warning': group.low }"><small class="mobile-label">总余额 · USD</small>{{ moneyNumber(group.estimatedCost) }}</span>
-                        <span class="numeric group-used"><small class="mobile-label">已使用 · USD</small>{{ moneyNumber(group.usedCost) }}</span>
+                        <span class="group-identity"><ui-icon name="layers"></ui-icon><span><strong>{{ group.name }}</strong><small :class="group.low ? 'text-warning' : 'subtle'">{{ group.low ? '预计总费用低于阈值' : '账号额度告急' }}</small></span></span>
+                        <span class="numeric group-balance" :class="{ 'text-warning': group.low }"><small class="mobile-label">预计总费用 · USD</small>{{ moneyNumber(group.estimatedCost) }}</span>
+                        <span class="numeric group-used"><small class="mobile-label">7d 已使用 · USD</small>{{ moneyNumber(group.usedCost) }}</span>
                         <span class="group-urgent"><span v-if="group.urgentCount" class="urgent-label">{{ group.urgentCount }} 个告急</span><span v-else class="subtle">无告急账号</span></span>
                         <ui-icon name="chevron-down" class="expand-icon" :class="{ expanded: groupExpanded(card.id, group), invisible: !group.accounts.length }"></ui-icon>
                       </button>
                       <div class="account-details" v-if="group.accounts.length && groupExpanded(card.id, group)" :id="detailsId(card.id, group)">
-                        <div class="account-columns" aria-hidden="true"><span>账号 / 平台</span><span>总余额 <small>USD</small></span><span>已使用 <small>USD</small></span><span>告急窗口 · 剩余额度</span></div>
+                        <div class="account-columns" aria-hidden="true"><span>账号 / 平台</span><span>预计总费用 <small>USD</small></span><span>7d 已使用 <small>USD</small></span><span>告急窗口 · 剩余额度</span></div>
                         <div class="monitor-account" v-for="account in group.accounts" :key="account.id == null ? account.name : account.id">
-                          <div class="account-identity"><span class="account-avatar" :class="platformClass(account.platform)">{{ platformInitial(account.platform) }}</span><div><strong :title="account.name">{{ account.name }}</strong><span>{{ account.platform || '未知平台' }}</span></div></div>
-                          <div class="numeric account-balance"><small class="mobile-label">总余额 · USD</small>{{ moneyNumber(account.estimatedCost) }}</div>
-                          <div class="numeric account-used"><small class="mobile-label">已使用 · USD</small>{{ moneyNumber(account.usedCost) }}</div>
+                          <div class="account-identity"><span class="account-avatar" :class="platformClass(account.platform)">{{ platformInitial(account.platform) }}</span><div><strong :title="account.name">{{ account.name }}</strong><span>{{ account.platform || '未知平台' }}</span><span class="account-updated-at" :title="formatStamp(account.usageUpdatedAt)">用量更新 {{ account.usageUpdatedAt ? formatTime(account.usageUpdatedAt) : '未知' }}</span></div></div>
+                          <div class="numeric account-balance"><small class="mobile-label">预计总费用 · USD</small>{{ moneyNumber(account.estimatedCost) }}</div>
+                          <div class="numeric account-used"><small class="mobile-label">7d 已使用 · USD</small>{{ moneyNumber(account.usedCost) }}</div>
                           <div class="account-windows"><template v-for="windowName in ['5h', '7d']" :key="windowName"><div v-if="windowPercent(account, windowName) != null" class="window-meter" :class="{ critical: windowPercent(account, windowName) <= 5 }"><span>{{ windowName }}</span><div class="quota-track" aria-hidden="true"><i :style="{ width: meterWidth(windowPercent(account, windowName)) }"></i></div><b>{{ percentText(windowPercent(account, windowName)) }}</b></div></template><span v-if="!account.windows?.length" class="subtle">暂无窗口数据</span></div>
                         </div>
                       </div>
                     </div>
                   </div>
-                  <div v-if="!card.view.all && !card.view.groups.length" class="healthy-state"><span class="healthy-icon"><ui-icon name="check"></ui-icon></span><div><strong>当前监控范围内无异常</strong><p>没有余额不足的分组或额度告急的账号</p></div></div>
-                  <footer class="server-summary"><span><i class="status-dot" :class="cardStatus(card).tone"></i>{{ card.view.lowGroupCount }} 个不足分组<span class="summary-divider">/</span>{{ card.view.urgentAccountCount }} 个告急账号</span><span v-if="card.error">上次成功读取 {{ formatTime(card.generatedAt) }}</span><span v-else>单账号剩余阈值 {{ form.quotaRemainPercent }}%</span></footer>
+                  <div v-if="!card.view.all && !card.view.groups.length" class="healthy-state"><span class="healthy-icon"><ui-icon name="check"></ui-icon></span><div><strong>当前监控范围内无异常</strong><p>没有预计总费用低于阈值或额度告急的账号<span v-if="card.view.unknownCostGroupCount">；{{ card.view.unknownCostGroupCount }} 个分组无费用数据，仅监控单账号额度</span></p></div></div>
+                  <footer class="server-summary"><span><i class="status-dot" :class="cardStatus(card).tone"></i>{{ card.view.lowGroupCount }} 个低于阈值分组<span class="summary-divider">/</span>{{ card.view.urgentAccountCount }} 个告急账号</span><span class="summary-threshold" v-if="card.error">上次成功读取 {{ formatTime(card.generatedAt) }}</span><span class="summary-threshold" v-else>单账号剩余阈值 {{ form.quotaRemainPercent }}%</span><div class="data-freshness"><span class="collected-at">采集完成 {{ formatStamp(card.generatedAt) || '未知' }}</span><span class="usage-updated-at">用量最早更新 {{ formatStamp(card.view.usageUpdatedAt) || '未知' }}</span><span v-if="card.view.usageTimestampMissingCount" class="usage-time-missing">{{ card.view.usageTimestampMissingCount }} 个账号未提供用量时间</span><span v-if="card.view.unknownCostGroupCount" class="cost-data-missing">{{ card.view.unknownCostGroupCount }} 个分组无费用数据，仅监控单账号额度</span></div></footer>
                 </template>
               </template>
             </article>
             <div v-if="!loading && !visibleMonitorCards.length" class="monitor-empty"><ui-icon :name="monitorCards.length ? 'search' : 'server'"></ui-icon><h3>{{ monitorCards.length ? '没有匹配的服务器或账号' : '没有启用监控的服务器' }}</h3><p>{{ monitorCards.length ? '试试其他关键词，或调整筛选条件' : '添加并启用服务器后，监控数据会显示在这里' }}</p><button v-if="monitorCards.length" type="button" class="ghost" @click="clearMonitorFilters">清除筛选</button><button v-else type="button" class="ghost" @click="openConfig">前往配置</button></div>
           </div>
-          <footer class="monitor-footnote"><span>余额口径：管理台预计总费用</span><span><i class="status-dot neutral"></i>刷新监控不会发送告警</span></footer>
+          <footer class="monitor-footnote"><span>预计总费用不是实际剩余余额；用量可能来自上游缓存</span><span><i class="status-dot neutral"></i>刷新监控不会发送告警</span></footer>
         </section>
       </div>
     </main>
   </div>
-  <script src="/vendor/vue.global.prod.js"></script>
+  <script src="./vendor/vue.global.prod.js"></script>
   <script type="module">
-    import { cardStatus, summarizeCards, filterCards, moneyNumber, balancePercent, percentText, windowPercent, meterWidth } from '/monitor-view.js';
+    import { cardStatus, summarizeCards, filterCards, moneyNumber, balancePercent, percentText, windowPercent, meterWidth } from './monitor-view.js';
     const { createApp, computed, reactive, ref, onMounted, onBeforeUnmount } = Vue;
     const MONITOR_REFRESH_MS = 30000;
 
@@ -653,7 +653,7 @@
       components: {
         UiIcon: {
           props: ['name'],
-          template: '<svg class="ui-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use :href="`/vendor/lucide-sprite.svg#${name}`"></use></svg>'
+          template: '<svg class="ui-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use :href="`./vendor/lucide-sprite.svg#${name}`"></use></svg>'
         }
       },
       setup() {
@@ -787,7 +787,7 @@
           tone.value = '';
           status.value = '';
           try {
-            const response = await fetch('/api/config');
+            const response = await fetch('./api/config');
             const body = await response.json();
             if (!response.ok) throw new Error(body.message || '读取配置失败');
             applyConfig(body);
@@ -829,7 +829,7 @@
           tone.value = '';
           status.value = '';
           try {
-            const response = await fetch('/api/config', {
+            const response = await fetch('./api/config', {
               method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(payload())
@@ -848,7 +848,7 @@
 
         async function loadSchedule() {
           try {
-            const response = await fetch('/api/schedule');
+            const response = await fetch('./api/schedule');
             const body = await response.json();
             if (response.ok) scheduleEnabled.value = Boolean(body.enabled);
           } catch {
@@ -861,7 +861,7 @@
           tone.value = '';
           status.value = '';
           try {
-            const response = await fetch('/api/check', { method: 'POST' });
+            const response = await fetch('./api/check', { method: 'POST' });
             const body = await response.json().catch(() => ({}));
             if (!response.ok) throw new Error(body.message || '检查失败');
             tone.value = body.failures?.length ? 'bad' : 'ok';
@@ -879,7 +879,7 @@
           scheduleBusy.value = true;
           const next = !scheduleEnabled.value;
           try {
-            const response = await fetch('/api/schedule', {
+            const response = await fetch('./api/schedule', {
               method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ enabled: next })
@@ -952,7 +952,7 @@
 
         async function readServer(id, state) {
           try {
-            const response = await fetch(`/api/monitor?server=${encodeURIComponent(id)}`);
+            const response = await fetch(`./api/monitor?server=${encodeURIComponent(id)}`);
             const body = await response.json().catch(() => ({}));
             if (!response.ok) throw new Error(body.message || '读取监控失败');
             const next = body.server || null;
@@ -1022,7 +1022,7 @@
             state.error = '';
           }
           try {
-            const response = await fetch('/api/groups', {
+            const response = await fetch('./api/groups', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({

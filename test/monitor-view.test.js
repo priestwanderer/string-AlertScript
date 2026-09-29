@@ -50,6 +50,12 @@ test('money and quota displays preserve zero and distinguish unknown values', ()
   assert.equal(windowPercent(account, '7d'), 0);
   assert.equal(windowPercent(account, '5h'), null);
   assert.equal(percentText(0), '0%');
+  assert.equal(percentText(0.01), '<0.1%');
+  assert.equal(percentText(0.5), '0.5%');
+  assert.equal(percentText(0.9), '0.9%');
+  assert.equal(percentText(1), '1%');
+  assert.equal(percentText(99), '99%');
+  assert.equal(percentText(99.1), '99.1%');
   assert.equal(percentText(null), '--');
   assert.equal(meterWidth(-10), '0%');
   assert.equal(meterWidth(105), '100%');

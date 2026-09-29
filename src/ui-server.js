@@ -48,10 +48,39 @@ async function readJson(req) {
   }
 }
 
-export function serveUi({ host = '127.0.0.1', port = 8787, loadConfig, saveConfig, listGroups, checkOnce, scheduleStatus, setSchedule, monitorSnapshot }) {
+export function serveUi({ host = '127.0.0.1', port = 8787, basePath = '', loadConfig, saveConfig, listGroups, checkOnce, scheduleStatus, setSchedule, monitorSnapshot }) {
+  const prefix = String(basePath).replace(/\/+$/, '');
+  if (prefix && !/^\/(?:[A-Za-z0-9_-]+)(?:\/[A-Za-z0-9_-]+)*$/.test(prefix)) {
+    throw new Error('UI_BASE_PATH 必须是以 / 开头的简单路径');
+  }
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url || '/', 'http://127.0.0.1');
+      if (prefix) {
+        if (url.pathname === prefix && req.method === 'GET') {
+          res.writeHead(308, { Location: `${prefix}/${url.search}`, 'Cache-Control': 'no-store' });
+          res.end();
+          return;
+        }
+        if (!url.pathname.startsWith(`${prefix}/`)) {
+          sendJson(res, 404, { message: '未找到' });
+          return;
+        }
+        url.pathname = url.pathname.slice(prefix.length);
+      }
+      // Authenticated browser requests must not be triggered by another site.
+      if (!['GET', 'HEAD'].includes(req.method)) {
+        const origin = req.headers.origin;
+        let sameOrigin = true;
+        if (origin) {
+          try { sameOrigin = new URL(origin).host === req.headers.host; }
+          catch { sameOrigin = false; }
+        }
+        if (!sameOrigin || req.headers['sec-fetch-site'] === 'cross-site') {
+          sendJson(res, 403, { message: '不允许跨站修改配置或触发告警' });
+          return;
+        }
+      }
       if (req.method === 'GET' && url.pathname === '/api/config') {
         sendJson(res, 200, await loadConfig());
         return;
@@ -111,7 +140,7 @@ export function serveUi({ host = '127.0.0.1', port = 8787, loadConfig, saveConfi
     server.listen(port, host, () => {
       server.off('error', reject);
       const actualPort = server.address().port;
-      resolve({ server, address: `http://${host}:${actualPort}` });
+      resolve({ server, address: `http://${host}:${actualPort}${prefix}` });
     });
   });
 }

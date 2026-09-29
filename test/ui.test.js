@@ -30,15 +30,15 @@ test('config page and local API are served', async () => {
     const page = await fetch(`${address}/`);
     const html = await page.text();
     assert.equal(page.status, 200);
-    assert.match(html, /全账号总余额告警/);
+    assert.match(html, /全账号预计总费用告警/);
     assert.match(html, /指定分组/);
     assert.match(html, /告警一次/);
     assert.match(html, /定时告警/);
     assert.match(html, /监控/);
     assert.match(html, /配置/);
     assert.match(html, /刷新/);
-    assert.match(html, /没有余额不足/);
-    assert.match(html, /不足分组/);
+    assert.match(html, /没有预计总费用低于阈值/);
+    assert.match(html, /低于阈值分组/);
     assert.match(html, /告急账号/);
     assert.match(html, /\/api\/monitor/);
     assert.match(html, /\/api\/monitor\?server=/);
@@ -51,7 +51,14 @@ test('config page and local API are served', async () => {
     assert.match(html, /aria-expanded/);
     assert.match(html, /刷新监控不会发送告警/);
     assert.match(html, /sk-shimmer/);
-    assert.match(html, /总余额阈值[\s\S]*USD/);
+    assert.match(html, /预计总费用阈值[\s\S]*USD/);
+    assert.doesNotMatch(html, /总余额/);
+    assert.match(html, /7d 已使用/);
+    assert.match(html, /采集完成/);
+    assert.match(html, /用量最早更新/);
+    assert.match(html, /仅监控单账号额度/);
+    assert.match(html, /account\.usageUpdatedAt/);
+    assert.match(html, /usageTimestampMissingCount/);
     assert.match(html, /单账号剩余[\s\S]*%/);
     assert.match(html, /静默时间[\s\S]*分钟/);
     assert.match(html, /定时告警[\s\S]*检查间隔[\s\S]*分钟/);
@@ -108,5 +115,47 @@ test('config page and local API are served', async () => {
     assert.deepEqual(seenServers, ['', 'japan']);
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test('deployment prefix isolates pages, assets and APIs and rejects cross-site writes', async () => {
+  let writes = 0;
+  const { server, address } = await serveUi({
+    host: '127.0.0.1', port: 0, basePath: '/ops-monitor/',
+    loadConfig: async () => ({ servers: [] }),
+    saveConfig: async () => { writes++; return {}; },
+    checkOnce: async () => { writes++; return {}; },
+    scheduleStatus: async () => ({ enabled: false })
+  });
+  const origin = new URL(address).origin;
+  try {
+    const redirect = await fetch(address, { redirect: 'manual' });
+    assert.equal(redirect.status, 308);
+    assert.equal(redirect.headers.get('location'), '/ops-monitor/');
+    const page = await fetch(`${address}/`);
+    const html = await page.text();
+    assert.match(html, /href="\.\/monitor\.css"/);
+    assert.match(html, /from '\.\/monitor-view\.js'/);
+    assert.match(html, /fetch\('\.\/api\/config'/);
+    for (const path of ['/api/config', '/monitor.css', '/monitor-view.js', '/vendor/vue.global.prod.js', '/vendor/lucide-sprite.svg']) {
+      assert.equal((await fetch(`${address}${path}`)).status, 200);
+      assert.equal((await fetch(`${origin}${path}`)).status, 404);
+    }
+    assert.equal((await fetch(`${address}/api/schedule`)).status, 200);
+    for (const headers of [{ Origin: 'https://untrusted.invalid' }, { Origin: 'null' }, { 'Sec-Fetch-Site': 'cross-site' }]) {
+      assert.equal((await fetch(`${address}/api/check`, { method: 'POST', headers })).status, 403);
+      assert.equal((await fetch(`${address}/api/config`, { method: 'PUT', headers, body: '{}' })).status, 403);
+    }
+    assert.equal(writes, 0);
+    assert.equal((await fetch(`${address}/api/config`, { method: 'PUT', headers: { Origin: origin }, body: '{}' })).status, 200);
+    assert.equal(writes, 1);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test('invalid deployment prefixes are rejected', () => {
+  for (const basePath of ['//outside', '/path?query', '/a/../b', 'relative']) {
+    assert.throws(() => serveUi({ basePath }), /UI_BASE_PATH/);
   }
 });

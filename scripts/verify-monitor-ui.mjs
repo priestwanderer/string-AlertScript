@@ -8,7 +8,7 @@ const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const out = resolve(process.env.UI_SCREENSHOT_DIR || '.ui-check');
 await mkdir(out, { recursive: true });
-const { server, address } = await openPreview();
+const { server, address } = await openPreview(0, process.env.UI_TEST_BASE_PATH || '');
 let browser;
 
 try {
@@ -22,10 +22,20 @@ try {
     if (request.method() !== 'GET') mutations.push(request.url());
     if (!request.url().startsWith(address)) remoteRequests.push(request.url());
   });
-  await page.goto(address);
+  await page.goto(`${address}/`);
   await page.locator('.monitor-account').nth(3).waitFor();
   assert.equal(await page.locator('.monitor-server').count(), 2);
   assert.equal(await page.locator('.stat-value').last().innerText(), '4\n个');
+  assert.match(await page.locator('.group-columns').first().innerText(), /预计总费用/);
+  assert.equal(await page.locator('.account-updated-at').first().getAttribute('title'), await page.evaluate((value) => new Date(value).toLocaleString('zh-CN', { hour12: false }), previewViews.japan.usageUpdatedAt));
+  assert.match(await page.locator('.usage-updated-at').first().innerText(), /用量最早更新.*2026/);
+  assert.equal(await page.locator('.usage-updated-at').last().innerText(), '用量最早更新 未知');
+  assert.equal(await page.locator('.usage-time-missing').first().innerText(), '1 个账号未提供用量时间');
+  assert.equal(await page.locator('.window-meter b').nth(1).innerText(), '0.9%');
+  const originalUsageTime = await page.locator('.usage-updated-at').first().innerText();
+  await page.getByRole('button', { name: '刷新 日本站', exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector('[aria-label="刷新 日本站"]').disabled);
+  assert.equal(await page.locator('.usage-updated-at').first().innerText(), originalUsageTime, 'collection must not replace the upstream timestamp');
   await checkPalette('monitor');
   await page.screenshot({ path: resolve(out, 'monitor-desktop.png'), fullPage: true });
 
@@ -117,6 +127,7 @@ try {
     await page.setViewportSize({ width, height: 1000 });
     await checkLayout(`${width}px`);
     await checkTypography(`${width}px`);
+    assert.equal(await page.locator('.data-freshness').first().isVisible(), true, 'freshness stays visible on mobile');
     if (width === 390) await page.screenshot({ path: resolve(out, 'monitor-mobile.png'), fullPage: true });
   }
 
@@ -208,7 +219,7 @@ try {
     }));
     assert.equal(overlapping, false, `long account overlaps amounts at ${width}px`);
   }
-  assert.equal(await page.locator('.monitor-account .account-balance').first().innerText(), '总余额 · USD\n--');
+  assert.equal(await page.locator('.monitor-account .account-balance').first().innerText(), '预计总费用 · USD\n--');
   assert.deepEqual(errors, [], 'browser runtime errors');
   assert.deepEqual(mutations, [], 'unexpected state-changing API calls');
   assert.deepEqual(remoteRequests, [], 'preview must not contact remote services');
